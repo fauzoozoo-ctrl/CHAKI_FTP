@@ -1,0 +1,5239 @@
+/***************************************************************
+ * KRYSTAL GROUP - IT HELPDESK DAILY REPORT SYSTEM
+ * FINAL SINGLE-FILE Code.gs
+ *
+ * FLOW:
+ * TALLY RESPONSE SHEET
+ *       ↓
+ * RAW_DATA
+ *       ↓
+ * ENGINEER SHEETS
+ *       ↓
+ * DASHBOARD + KPI + CHARTS
+ *       ↓
+ * EOD EMAIL REMINDERS
+ *
+ * IMPORTANT:
+ * - Tally connection is NOT changed.
+ * - No clearCharts() is used.
+ * - Dashboard KPIs are calculated from Raw_Data.
+ * - Engineer sheets are rebuilt from Raw_Data.
+ * - Monday-Saturday reminders after 5 PM IST.
+ ***************************************************************/
+
+
+/***************************************************************
+ * CONFIGURATION
+ ***************************************************************/
+var CFG = {
+  SPREADSHEET_ID: '1Jkol6IRhGGH3IczlEbSbXh6ZExDbNvf7sfLe1hRk4bE',
+
+  TALLY_FORM_URL: 'https://tally.so/r/445yBY',
+  TALLY_SHEET_NAME: 'Krystal - IT Helpdesk Daily Report',
+
+  RAW_SHEET_NAME: 'Raw_Data',
+  DASHBOARD_SHEET_NAME: 'Dashboard',
+  MASTER_SHEET_NAME: 'Master',
+  LISTS_SHEET_NAME: 'Lists',
+  REMINDER_LOG_SHEET_NAME: 'Reminder_Log',
+  SYNC_INDEX_SHEET_NAME: 'Sync_Index',
+
+  TIMEZONE: 'Asia/Kolkata',
+
+  REMINDER_HOUR: 17,
+  REMINDER_MINUTE: 0,
+
+  SENDER_NAME: 'Krystal IT Helpdesk',
+  SENDER_EMAIL: 'krystalithelpdesk@gmail.com',
+  CC_EMAIL: 'itdesk@krystal-group.com',
+
+  SLA_HOURS: 8,
+
+  ENGINEERS: [
+    {
+      name: 'Yogesh',
+      email: 'yogesh.jadhav@krystal-group.com'
+    },
+    {
+      name: 'Rahul',
+      email: 'rahul.wala@krystal-group.com'
+    },
+    {
+      name: 'Avinash',
+      email: 'avinash.ingale@krystal-group.com'
+    },
+    {
+      name: 'Dinesh',
+      email: 'dinesh.padwal@krystal-group.com'
+    },
+    {
+      name: 'Imtiyaz',
+      email: 'imtiyaz.mulla@krystal-group.com'
+    }
+  ],
+
+  RAW_HEADERS: [
+    'Submission ID',
+    'Respondent ID',
+    'Submitted At',
+    'Date',
+    'Engineer Name',
+    'Dept.',
+    'Location',
+    'Problem Reported for',
+    'Call Received Time',
+    'Username',
+    'Action Taken',
+    'Start Time',
+    'End Time',
+    'Total Time',
+    'Call Category',
+    'Completed',
+    'Completed Date'
+  ],
+
+  TALLY_REQUIRED: [
+    'submissionid',
+    'respondentid',
+    'submittedat',
+    'date',
+    'engineername',
+    'dept',
+    'location',
+    'problemreportedfor',
+    'callreceivedtime',
+    'username',
+    'actiontaken',
+    'starttime',
+    'endtime',
+    'callcategory',
+    'completed',
+    'completeddate'
+  ]
+};
+
+
+/***************************************************************
+ * MENU
+ ***************************************************************/
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi()
+      .createMenu('Krystal IT Helpdesk')
+      .addItem('Refresh Everything', 'SYNC_TALLY_NOW')
+      .addItem('Refresh Dashboard Only', 'UPDATE_DASHBOARD')
+      .addItem('Reset Dashboard Filters', 'RESET_DASHBOARD_FILTERS')
+      .addSeparator()
+      .addItem('Install / Repair Triggers', 'INSTALL_TRIGGERS')
+      .addItem('Verify Full System', 'VERIFY_SYSTEM')
+      .addItem('Test Reminder Status', 'TEST_REMINDER_STATUS')
+      .addItem('Send Test Email', 'TEST_EMAIL')
+      .addToUi();
+  } catch (err) {
+    Logger.log('onOpen error: ' + err);
+  }
+}
+
+
+/***************************************************************
+ * MAIN MASTER SYNC
+ ***************************************************************/
+function SYNC_TALLY_NOW() {
+  var lock = LockService.getScriptLock();
+
+  if (!lock.tryLock(5000)) {
+    Logger.log(
+      'SYNC_TALLY_NOW skipped: another sync is already running.'
+    );
+    return 'SYNC SKIPPED - ANOTHER SYNC IS RUNNING';
+  }
+
+  try {
+    var ss = SpreadsheetApp.openById(CFG.SPREADSHEET_ID);
+
+    try {
+      ss.setSpreadsheetTimeZone(CFG.TIMEZONE);
+    } catch (tzErr) {
+      Logger.log('Timezone warning: ' + tzErr);
+    }
+
+    Logger.log('==========================================');
+    Logger.log('KRYSTAL FULL SYNC STARTED');
+    Logger.log('==========================================');
+
+    UPDATE_TALLY_TOTAL_TIME();
+
+    VALIDATE_TALLY_HEADERS();
+
+    SYNC_INTERNAL();
+
+    UPDATE_RAW_TOTAL_TIME();
+
+    BUILD_MASTER();
+
+    BUILD_LISTS();
+
+    BUILD_ENGINEER_SHEETS();
+
+    UPDATE_DASHBOARD();
+
+    SpreadsheetApp.flush();
+
+    Logger.log('==========================================');
+    Logger.log('KRYSTAL FULL SYNC COMPLETED');
+    Logger.log('==========================================');
+
+    return 'SYNC COMPLETE';
+
+  } catch (err) {
+    Logger.log('SYNC_TALLY_NOW ERROR: ' + err);
+    throw err;
+
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (releaseErr) {
+      Logger.log('Lock release warning: ' + releaseErr);
+    }
+  }
+}
+
+
+/***************************************************************
+ * AUTO SYNC
+ ***************************************************************/
+function AUTO_SYNC() {
+  try {
+    var result = SYNC_TALLY_NOW();
+    Logger.log('AUTO_SYNC result: ' + result);
+  } catch (err) {
+    Logger.log('AUTO_SYNC ERROR: ' + err);
+  }
+}
+
+
+/***************************************************************
+ * MASTER REFRESH
+ ***************************************************************/
+function MASTER_REFRESH() {
+  return SYNC_TALLY_NOW();
+}
+
+
+/***************************************************************
+ * NORMALIZE HEADER
+ ***************************************************************/
+function NORMALIZE_HEADER(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+
+/***************************************************************
+ * GET HEADER INDEX
+ ***************************************************************/
+function GET_HEADER_INDEX(headers) {
+  var map = {};
+  var i;
+
+  for (i = 0; i < headers.length; i++) {
+    map[NORMALIZE_HEADER(headers[i])] = i;
+  }
+
+  return map;
+}
+
+
+/***************************************************************
+ * ENSURE SHEET
+ ***************************************************************/
+function ENSURE_SHEET(name, headers) {
+  var ss = SpreadsheetApp.openById(CFG.SPREADSHEET_ID);
+  var sh = ss.getSheetByName(name);
+
+  if (!sh) {
+    sh = ss.insertSheet(name);
+  }
+
+  if (headers && headers.length > 0) {
+    if (sh.getMaxColumns() < headers.length) {
+      sh.insertColumnsAfter(
+        sh.getMaxColumns(),
+        headers.length - sh.getMaxColumns()
+      );
+    }
+
+    sh.getRange(
+      1,
+      1,
+      1,
+      headers.length
+    ).setValues([headers]);
+  }
+
+  return sh;
+}
+
+
+/***************************************************************
+ * VALIDATE TALLY HEADERS
+ ***************************************************************/
+function VALIDATE_TALLY_HEADERS() {
+  var ss = SpreadsheetApp.openById(CFG.SPREADSHEET_ID);
+  var sh = ss.getSheetByName(CFG.TALLY_SHEET_NAME);
+
+  if (!sh) {
+    throw new Error(
+      'Tally response sheet not found: ' +
+      CFG.TALLY_SHEET_NAME
+    );
+  }
+
+  if (sh.getLastRow() < 1 || sh.getLastColumn() < 1) {
+    throw new Error(
+      'Tally response sheet is empty: ' +
+      CFG.TALLY_SHEET_NAME
+    );
+  }
+
+  var headers = sh
+    .getRange(
+      1,
+      1,
+      1,
+      sh.getLastColumn()
+    )
+    .getValues()[0];
+
+  var idx = GET_HEADER_INDEX(headers);
+  var missing = [];
+  var i;
+
+  for (i = 0; i < CFG.TALLY_REQUIRED.length; i++) {
+    if (
+      idx[CFG.TALLY_REQUIRED[i]] === undefined
+    ) {
+      missing.push(
+        CFG.TALLY_REQUIRED[i]
+      );
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      'Missing required Tally headers: ' +
+      missing.join(', ')
+    );
+  }
+
+  Logger.log(
+    'PASS: All required Tally headers found.'
+  );
+
+  return true;
+}
+
+
+/***************************************************************
+ * TALLY TOTAL TIME UPDATE
+ *
+ * DOES NOT CHANGE THE TALLY CONNECTION.
+ ***************************************************************/
+function UPDATE_TALLY_TOTAL_TIME() {
+  var ss = SpreadsheetApp.openById(CFG.SPREADSHEET_ID);
+  var sh = ss.getSheetByName(CFG.TALLY_SHEET_NAME);
+
+  if (!sh) {
+    throw new Error(
+      'Tally response sheet not found: ' +
+      CFG.TALLY_SHEET_NAME
+    );
+  }
+
+  var lastRow = sh.getLastRow();
+  var lastCol = sh.getLastColumn();
+
+  if (lastRow < 1 || lastCol < 1) {
+    return;
+  }
+
+  var values = sh
+    .getRange(
+      1,
+      1,
+      lastRow,
+      lastCol
+    )
+    .getValues();
+
+  var headers = values[0];
+  var idx = GET_HEADER_INDEX(headers);
+
+  var startIndex = idx['starttime'];
+  var endIndex = idx['endtime'];
+  var totalIndex = idx['totaltime'];
+
+  if (
+    startIndex === undefined ||
+    endIndex === undefined
+  ) {
+    Logger.log(
+      'Tally Start Time / End Time headers not found.'
+    );
+    return;
+  }
+
+  /*
+   * totalIndex is zero-based.
+   * getRange() is one-based.
+   */
+  var totalColumn;
+
+  if (totalIndex === undefined) {
+    totalColumn = sh.getLastColumn() + 1;
+
+    sh.getRange(
+      1,
+      totalColumn
+    ).setValue('Total Time');
+
+    totalIndex = totalColumn - 1;
+
+  } else {
+    totalColumn = totalIndex + 1;
+  }
+
+  var output = [];
+  var r;
+
+  for (r = 1; r < values.length; r++) {
+    var start = values[r][startIndex];
+    var end = values[r][endIndex];
+
+    if (
+      start === '' ||
+      start === null ||
+      end === '' ||
+      end === null
+    ) {
+      output.push(['']);
+    } else {
+      output.push([
+        DURATION_TEXT(start, end)
+      ]);
+    }
+  }
+
+  if (output.length > 0) {
+    sh.getRange(
+      2,
+      totalColumn,
+      output.length,
+      1
+    ).setValues(output);
+  }
+
+  sh.getRange(
+    1,
+    1,
+    1,
+    sh.getLastColumn()
+  )
+    .setFontWeight('bold');
+
+  Logger.log(
+    'Tally Total Time updated. Column: ' +
+    totalColumn
+  );
+}
+
+
+/***************************************************************
+ * INTERNAL SYNC
+ *
+ * TALLY → RAW_DATA
+ ***************************************************************/
+function SYNC_INTERNAL() {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var tally = ss.getSheetByName(
+    CFG.TALLY_SHEET_NAME
+  );
+
+  if (!tally) {
+    throw new Error(
+      'Tally response sheet not found: ' +
+      CFG.TALLY_SHEET_NAME
+    );
+  }
+
+  var raw = ENSURE_SHEET(
+    CFG.RAW_SHEET_NAME,
+    CFG.RAW_HEADERS
+  );
+
+  var lastRow = tally.getLastRow();
+  var lastCol = tally.getLastColumn();
+
+  if (lastRow < 2) {
+    CLEAR_DATA_ROWS(
+      raw,
+      CFG.RAW_HEADERS.length
+    );
+
+    BUILD_SYNC_INDEX([]);
+
+    FORMAT_RAW_SHEET(raw);
+
+    Logger.log(
+      'No Tally records found.'
+    );
+
+    return;
+  }
+
+  var tallyValues = tally
+    .getRange(
+      1,
+      1,
+      lastRow,
+      lastCol
+    )
+    .getValues();
+
+  var headers = tallyValues[0];
+  var idx = GET_HEADER_INDEX(headers);
+
+  var rows = [];
+  var syncRows = [];
+
+  var r;
+
+  for (r = 1; r < tallyValues.length; r++) {
+    var row = tallyValues[r];
+
+    if (IS_EMPTY_ROW(row)) {
+      continue;
+    }
+
+    var submissionId = GET_CELL(
+      row,
+      idx['submissionid']
+    );
+
+    if (
+      submissionId === '' ||
+      submissionId === null ||
+      submissionId === undefined
+    ) {
+      submissionId =
+        'TALLY-ROW-' + (r + 1);
+    }
+
+    var respondentId = GET_CELL(
+      row,
+      idx['respondentid']
+    );
+
+    var submittedAt = GET_CELL(
+      row,
+      idx['submittedat']
+    );
+
+    var dateValue = GET_CELL(
+      row,
+      idx['date']
+    );
+
+    var engineer = GET_CELL(
+      row,
+      idx['engineername']
+    );
+
+    var dept = GET_CELL(
+      row,
+      idx['dept']
+    );
+
+    var location = GET_CELL(
+      row,
+      idx['location']
+    );
+
+    var problem = GET_CELL(
+      row,
+      idx['problemreportedfor']
+    );
+
+    var callReceived = GET_CELL(
+      row,
+      idx['callreceivedtime']
+    );
+
+    var username = GET_CELL(
+      row,
+      idx['username']
+    );
+
+    var actionTaken = GET_CELL(
+      row,
+      idx['actiontaken']
+    );
+
+    var startTime = GET_CELL(
+      row,
+      idx['starttime']
+    );
+
+    var endTime = GET_CELL(
+      row,
+      idx['endtime']
+    );
+
+    var category = GET_CELL(
+      row,
+      idx['callcategory']
+    );
+
+    var completed = NORMALIZE_COMPLETED(
+      GET_CELL(
+        row,
+        idx['completed']
+      )
+    );
+
+    var completedDate = GET_CELL(
+      row,
+      idx['completeddate']
+    );
+
+    var totalTime = '';
+
+    if (
+      startTime !== '' &&
+      startTime !== null &&
+      endTime !== '' &&
+      endTime !== null
+    ) {
+      totalTime = DURATION_TEXT(
+        startTime,
+        endTime
+      );
+    }
+
+    rows.push([
+      submissionId,
+      respondentId,
+      submittedAt,
+      dateValue,
+      engineer,
+      dept,
+      location,
+      problem,
+      callReceived,
+      username,
+      actionTaken,
+      startTime,
+      endTime,
+      totalTime,
+      category,
+      completed,
+      completedDate
+    ]);
+
+    syncRows.push([
+      submissionId,
+      r + 1
+    ]);
+  }
+
+  CLEAR_DATA_ROWS(
+    raw,
+    CFG.RAW_HEADERS.length
+  );
+
+  if (rows.length > 0) {
+    raw.getRange(
+      2,
+      1,
+      rows.length,
+      CFG.RAW_HEADERS.length
+    ).setValues(rows);
+  }
+
+  BUILD_SYNC_INDEX(syncRows);
+
+  FORMAT_RAW_SHEET(raw);
+
+  Logger.log(
+    'Raw_Data synchronized records: ' +
+    rows.length
+  );
+}
+
+
+/***************************************************************
+ * CLEAR DATA ROWS
+ ***************************************************************/
+function CLEAR_DATA_ROWS(sh, numberOfColumns) {
+  if (!sh) {
+    return;
+  }
+
+  var lastRow = sh.getLastRow();
+
+  if (lastRow > 1) {
+    sh.getRange(
+      2,
+      1,
+      lastRow - 1,
+      numberOfColumns
+    ).clearContent();
+  }
+}
+
+
+/***************************************************************
+ * SYNC INDEX
+ ***************************************************************/
+function BUILD_SYNC_INDEX(rows) {
+  var sh = ENSURE_SHEET(
+    CFG.SYNC_INDEX_SHEET_NAME,
+    [
+      'Submission ID',
+      'Tally Row'
+    ]
+  );
+
+  if (sh.getLastRow() > 1) {
+    sh.getRange(
+      2,
+      1,
+      sh.getLastRow() - 1,
+      2
+    ).clearContent();
+  }
+
+  if (rows.length > 0) {
+    sh.getRange(
+      2,
+      1,
+      rows.length,
+      2
+    ).setValues(rows);
+  }
+
+  sh.setFrozenRows(1);
+}
+
+
+/***************************************************************
+ * RAW TOTAL TIME
+ ***************************************************************/
+function UPDATE_RAW_TOTAL_TIME() {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var sh = ss.getSheetByName(
+    CFG.RAW_SHEET_NAME
+  );
+
+  if (!sh || sh.getLastRow() < 2) {
+    return;
+  }
+
+  var values = sh
+    .getRange(
+      1,
+      1,
+      sh.getLastRow(),
+      CFG.RAW_HEADERS.length
+    )
+    .getValues();
+
+  var output = [];
+  var i;
+
+  for (i = 1; i < values.length; i++) {
+    var start = values[i][11];
+    var end = values[i][12];
+
+    if (
+      start === '' ||
+      start === null ||
+      end === '' ||
+      end === null
+    ) {
+      output.push(['']);
+    } else {
+      output.push([
+        DURATION_TEXT(start, end)
+      ]);
+    }
+  }
+
+  if (output.length > 0) {
+    sh.getRange(
+      2,
+      14,
+      output.length,
+      1
+    ).setValues(output);
+  }
+}
+
+
+/***************************************************************
+ * NORMALIZE COMPLETED
+ ***************************************************************/
+function NORMALIZE_COMPLETED(value) {
+  var s = String(value || '')
+    .trim()
+    .toLowerCase();
+
+  if (
+    s === 'yes' ||
+    s === 'completed' ||
+    s === 'complete' ||
+    s === 'done' ||
+    s === 'closed' ||
+    s === 'true' ||
+    s === '1'
+  ) {
+    return 'Completed';
+  }
+
+  return 'Pending';
+}
+
+
+/***************************************************************
+ * TIME TO MINUTES
+ ***************************************************************/
+function TIME_MIN(value) {
+  if (
+    value === '' ||
+    value === null ||
+    value === undefined
+  ) {
+    return null;
+  }
+
+  if (
+    Object.prototype.toString.call(value) ===
+    '[object Date]'
+  ) {
+    if (isNaN(value.getTime())) {
+      return null;
+    }
+
+    return (
+      value.getHours() * 60 +
+      value.getMinutes() +
+      Math.floor(
+        value.getSeconds() / 60
+      )
+    );
+  }
+
+  if (typeof value === 'number') {
+    if (value >= 0 && value <= 1) {
+      return Math.round(
+        value * 24 * 60
+      );
+    }
+
+    if (
+      value >= 0 &&
+      value <= 1440
+    ) {
+      return Math.round(value);
+    }
+
+    return null;
+  }
+
+  var s = String(value).trim();
+
+  if (!s) {
+    return null;
+  }
+
+  s = s.replace(/\./g, ':');
+
+  var ampm = '';
+  var upper = s.toUpperCase();
+
+  if (upper.indexOf('AM') >= 0) {
+    ampm = 'AM';
+  }
+
+  if (upper.indexOf('PM') >= 0) {
+    ampm = 'PM';
+  }
+
+  s = s
+    .replace(/AM/ig, '')
+    .replace(/PM/ig, '')
+    .trim();
+
+  var parts = s.split(':');
+
+  if (parts.length >= 2) {
+    var h = parseInt(
+      parts[0],
+      10
+    );
+
+    var m = parseInt(
+      parts[1],
+      10
+    );
+
+    if (
+      isNaN(h) ||
+      isNaN(m) ||
+      m < 0 ||
+      m > 59
+    ) {
+      return null;
+    }
+
+    if (
+      ampm === 'PM' &&
+      h < 12
+    ) {
+      h += 12;
+    }
+
+    if (
+      ampm === 'AM' &&
+      h === 12
+    ) {
+      h = 0;
+    }
+
+    if (
+      h >= 0 &&
+      h <= 23
+    ) {
+      return h * 60 + m;
+    }
+  }
+
+  var numeric = parseFloat(s);
+
+  if (!isNaN(numeric)) {
+    return Math.round(numeric);
+  }
+
+  return null;
+}
+
+
+/***************************************************************
+ * DURATION MINUTES
+ ***************************************************************/
+function DURATION(start, end) {
+  var s = TIME_MIN(start);
+  var e = TIME_MIN(end);
+
+  if (
+    s === null ||
+    e === null
+  ) {
+    return null;
+  }
+
+  var diff = e - s;
+
+  if (diff < 0) {
+    diff += 1440;
+  }
+
+  return diff;
+}
+
+
+/***************************************************************
+ * DURATION TEXT
+ ***************************************************************/
+function DURATION_TEXT(start, end) {
+  var minutes = DURATION(
+    start,
+    end
+  );
+
+  if (minutes === null) {
+    return '';
+  }
+
+  minutes = Math.round(minutes);
+
+  var hours = Math.floor(
+    minutes / 60
+  );
+
+  var mins = minutes % 60;
+
+  if (
+    hours > 0 &&
+    mins > 0
+  ) {
+    return (
+      hours +
+      ' hr ' +
+      mins +
+      ' min'
+    );
+  }
+
+  if (hours > 0) {
+    return hours + ' hr';
+  }
+
+  return mins + ' min';
+}
+
+
+/***************************************************************
+ * PARSE DURATION TEXT
+ ***************************************************************/
+function PARSE_DURATION_TEXT(value) {
+  if (
+    value === '' ||
+    value === null ||
+    value === undefined
+  ) {
+    return 0;
+  }
+
+  if (typeof value === 'number') {
+    return Math.round(value);
+  }
+
+  var s = String(value)
+    .toLowerCase()
+    .trim();
+
+  var hours = 0;
+  var mins = 0;
+
+  var hm = s.match(
+    /(\d+(?:\.\d+)?)\s*h/
+  );
+
+  if (hm) {
+    hours = parseFloat(
+      hm[1]
+    );
+  }
+
+  var mm = s.match(
+    /(\d+(?:\.\d+)?)\s*m/
+  );
+
+  if (mm) {
+    mins = parseFloat(
+      mm[1]
+    );
+  }
+
+  if (!hm && !mm) {
+    var n = parseFloat(s);
+
+    if (!isNaN(n)) {
+      return Math.round(n);
+    }
+  }
+
+  return Math.round(
+    hours * 60 + mins
+  );
+}
+
+
+/***************************************************************
+ * DATE PARSER
+ ***************************************************************/
+function TO_DATE(value) {
+  if (
+    value === '' ||
+    value === null ||
+    value === undefined
+  ) {
+    return null;
+  }
+
+  if (
+    Object.prototype.toString.call(value) ===
+    '[object Date]'
+  ) {
+    if (isNaN(value.getTime())) {
+      return null;
+    }
+
+    return new Date(
+      value.getTime()
+    );
+  }
+
+  if (typeof value === 'number') {
+    if (value > 20000) {
+      var excelDate = new Date(
+        Math.round(
+          (value - 25569) *
+          86400000
+        )
+      );
+
+      if (
+        !isNaN(
+          excelDate.getTime()
+        )
+      ) {
+        return excelDate;
+      }
+    }
+
+    return null;
+  }
+
+  var s = String(value).trim();
+
+  if (!s) {
+    return null;
+  }
+
+  var d = new Date(s);
+
+  if (!isNaN(d.getTime())) {
+    return d;
+  }
+
+  var m = s.match(
+    /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/
+  );
+
+  if (m) {
+    var day = parseInt(
+      m[1],
+      10
+    );
+
+    var month = parseInt(
+      m[2],
+      10
+    ) - 1;
+
+    var year = parseInt(
+      m[3],
+      10
+    );
+
+    if (year < 100) {
+      year += 2000;
+    }
+
+    var customDate = new Date(
+      year,
+      month,
+      day
+    );
+
+    if (
+      !isNaN(
+        customDate.getTime()
+      )
+    ) {
+      return customDate;
+    }
+  }
+
+  return null;
+}
+
+
+/***************************************************************
+ * DATE KEY
+ ***************************************************************/
+function DATE_KEY(value) {
+  var d = TO_DATE(value);
+
+  if (!d) {
+    return '';
+  }
+
+  return Utilities.formatDate(
+    d,
+    CFG.TIMEZONE,
+    'yyyy-MM-dd'
+  );
+}
+
+
+/***************************************************************
+ * GET CELL
+ ***************************************************************/
+function GET_CELL(row, index) {
+  if (
+    index === undefined ||
+    index === null ||
+    index < 0 ||
+    index >= row.length
+  ) {
+    return '';
+  }
+
+  return row[index];
+}
+
+
+/***************************************************************
+ * EMPTY ROW
+ ***************************************************************/
+function IS_EMPTY_ROW(row) {
+  var i;
+
+  for (
+    i = 0;
+    i < row.length;
+    i++
+  ) {
+    if (
+      row[i] !== '' &&
+      row[i] !== null &&
+      row[i] !== undefined
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
+/***************************************************************
+ * FORMAT RAW DATA
+ ***************************************************************/
+function FORMAT_RAW_SHEET(sh) {
+  if (!sh || sh.getLastRow() < 1) {
+    return;
+  }
+
+  sh.setFrozenRows(1);
+
+  sh.getRange(
+    1,
+    1,
+    1,
+    CFG.RAW_HEADERS.length
+  )
+    .setFontWeight('bold')
+    .setBackground('#17365D')
+    .setFontColor('#FFFFFF');
+
+  if (sh.getLastRow() > 1) {
+    sh.getRange(
+      2,
+      4,
+      sh.getLastRow() - 1,
+      1
+    ).setNumberFormat(
+      'dd-mmm-yyyy'
+    );
+
+    sh.getRange(
+      2,
+      17,
+      sh.getLastRow() - 1,
+      1
+    ).setNumberFormat(
+      'dd-mmm-yyyy'
+    );
+
+    var statusRange = sh.getRange(
+      2,
+      16,
+      sh.getLastRow() - 1,
+      1
+    );
+
+    var rules = [];
+
+    rules.push(
+      SpreadsheetApp
+        .newConditionalFormatRule()
+        .whenTextEqualTo('Completed')
+        .setBackground('#D9EAD3')
+        .setFontColor('#274E13')
+        .setRanges([statusRange])
+        .build()
+    );
+
+    rules.push(
+      SpreadsheetApp
+        .newConditionalFormatRule()
+        .whenTextEqualTo('Pending')
+        .setBackground('#FCE8E6')
+        .setFontColor('#990000')
+        .setRanges([statusRange])
+        .build()
+    );
+
+    sh.setConditionalFormatRules(
+      rules
+    );
+  }
+
+  sh.autoResizeColumns(
+    1,
+    CFG.RAW_HEADERS.length
+  );
+}
+
+
+/***************************************************************
+ * BUILD MASTER
+ ***************************************************************/
+function BUILD_MASTER() {
+  var headers = [
+    'Engineer Name',
+    'Email',
+    'Active',
+    'SLA Hours'
+  ];
+
+  var sh = ENSURE_SHEET(
+    CFG.MASTER_SHEET_NAME,
+    headers
+  );
+
+  if (sh.getLastRow() > 1) {
+    sh.getRange(
+      2,
+      1,
+      sh.getLastRow() - 1,
+      headers.length
+    ).clearContent();
+  }
+
+  var rows = [];
+  var i;
+
+  for (
+    i = 0;
+    i < CFG.ENGINEERS.length;
+    i++
+  ) {
+    rows.push([
+      CFG.ENGINEERS[i].name,
+      CFG.ENGINEERS[i].email,
+      'Yes',
+      CFG.SLA_HOURS
+    ]);
+  }
+
+  if (rows.length > 0) {
+    sh.getRange(
+      2,
+      1,
+      rows.length,
+      headers.length
+    ).setValues(rows);
+  }
+
+  sh.getRange(
+    1,
+    1,
+    1,
+    headers.length
+  )
+    .setFontWeight('bold')
+    .setBackground('#17365D')
+    .setFontColor('#FFFFFF');
+
+  sh.setFrozenRows(1);
+
+  sh.autoResizeColumns(
+    1,
+    headers.length
+  );
+}
+
+
+/***************************************************************
+ * BUILD LISTS
+ ***************************************************************/
+function BUILD_LISTS() {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var raw = ss.getSheetByName(
+    CFG.RAW_SHEET_NAME
+  );
+
+  var sh = ENSURE_SHEET(
+    CFG.LISTS_SHEET_NAME,
+    [
+      'Engineer',
+      'Department',
+      'Location',
+      'Call Category',
+      'Status'
+    ]
+  );
+
+  var engineerSet = {};
+  var deptSet = {};
+  var locationSet = {};
+  var categorySet = {};
+
+  engineerSet['All'] = true;
+  deptSet['All'] = true;
+  locationSet['All'] = true;
+  categorySet['All'] = true;
+
+  var i;
+
+  for (
+    i = 0;
+    i < CFG.ENGINEERS.length;
+    i++
+  ) {
+    engineerSet[
+      CFG.ENGINEERS[i].name
+    ] = true;
+  }
+
+  if (
+    raw &&
+    raw.getLastRow() > 1
+  ) {
+    var data = raw.getRange(
+      2,
+      1,
+      raw.getLastRow() - 1,
+      CFG.RAW_HEADERS.length
+    ).getValues();
+
+    for (
+      i = 0;
+      i < data.length;
+      i++
+    ) {
+      var engineer =
+        String(
+          data[i][4] || ''
+        ).trim();
+
+      var dept =
+        String(
+          data[i][5] || ''
+        ).trim();
+
+      var location =
+        String(
+          data[i][6] || ''
+        ).trim();
+
+      var category =
+        String(
+          data[i][14] || ''
+        ).trim();
+
+      if (engineer) {
+        engineerSet[engineer] = true;
+      }
+
+      if (dept) {
+        deptSet[dept] = true;
+      }
+
+      if (location) {
+        locationSet[location] = true;
+      }
+
+      if (category) {
+        categorySet[category] = true;
+      }
+    }
+  }
+
+  var engineers =
+    SORT_OBJECT_KEYS(
+      engineerSet
+    );
+
+  var departments =
+    SORT_OBJECT_KEYS(
+      deptSet
+    );
+
+  var locations =
+    SORT_OBJECT_KEYS(
+      locationSet
+    );
+
+  var categories =
+    SORT_OBJECT_KEYS(
+      categorySet
+    );
+
+  var maxRows = Math.max(
+    engineers.length,
+    departments.length,
+    locations.length,
+    categories.length,
+    2
+  );
+
+  if (
+    sh.getMaxRows() <
+    maxRows + 1
+  ) {
+    sh.insertRowsAfter(
+      sh.getMaxRows(),
+      maxRows + 1 -
+      sh.getMaxRows()
+    );
+  }
+
+  if (sh.getLastRow() > 1) {
+    sh.getRange(
+      2,
+      1,
+      sh.getLastRow() - 1,
+      5
+    ).clearContent();
+  }
+
+  var output = [];
+  var r;
+
+  for (
+    r = 0;
+    r < maxRows;
+    r++
+  ) {
+    output.push([
+      engineers[r] || '',
+      departments[r] || '',
+      locations[r] || '',
+      categories[r] || '',
+      r === 0 ? 'All' : ''
+    ]);
+  }
+
+  sh.getRange(
+    2,
+    1,
+    output.length,
+    5
+  ).setValues(output);
+
+  sh.getRange(
+    1,
+    1,
+    1,
+    5
+  )
+    .setFontWeight('bold')
+    .setBackground('#17365D')
+    .setFontColor('#FFFFFF');
+
+  sh.setFrozenRows(1);
+
+  sh.autoResizeColumns(
+    1,
+    5
+  );
+}
+
+
+/***************************************************************
+ * SORT OBJECT KEYS
+ ***************************************************************/
+function SORT_OBJECT_KEYS(obj) {
+  var arr = Object.keys(obj);
+
+  arr.sort(function(a, b) {
+    return a.localeCompare(b);
+  });
+
+  return arr;
+}
+
+
+/***************************************************************
+ * BUILD ENGINEER SHEETS
+ ***************************************************************/
+function BUILD_ENGINEER_SHEETS() {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var raw = ss.getSheetByName(
+    CFG.RAW_SHEET_NAME
+  );
+
+  var rawData = [];
+
+  if (
+    raw &&
+    raw.getLastRow() > 1
+  ) {
+    rawData = raw.getRange(
+      2,
+      1,
+      raw.getLastRow() - 1,
+      CFG.RAW_HEADERS.length
+    ).getValues();
+  }
+
+  var i;
+
+  for (
+    i = 0;
+    i < CFG.ENGINEERS.length;
+    i++
+  ) {
+    var engineerName =
+      CFG.ENGINEERS[i].name;
+
+    var sheetName =
+      'Engineer - ' +
+      engineerName;
+
+    var sh = ENSURE_SHEET(
+      sheetName,
+      CFG.RAW_HEADERS
+    );
+
+    if (sh.getLastRow() > 1) {
+      sh.getRange(
+        2,
+        1,
+        sh.getLastRow() - 1,
+        CFG.RAW_HEADERS.length
+      ).clearContent();
+    }
+
+    var rows = [];
+    var j;
+
+    for (
+      j = 0;
+      j < rawData.length;
+      j++
+    ) {
+      var rowEngineer =
+        String(
+          rawData[j][4] || ''
+        )
+          .trim()
+          .toLowerCase();
+
+      if (
+        rowEngineer ===
+        engineerName
+          .trim()
+          .toLowerCase()
+      ) {
+        rows.push(
+          rawData[j]
+        );
+      }
+    }
+
+    if (rows.length > 0) {
+      sh.getRange(
+        2,
+        1,
+        rows.length,
+        CFG.RAW_HEADERS.length
+      ).setValues(rows);
+    }
+
+    FORMAT_ENGINEER_SHEET(sh);
+
+    Logger.log(
+      sheetName +
+      ' records: ' +
+      rows.length
+    );
+  }
+}
+
+
+/***************************************************************
+ * FORMAT ENGINEER SHEET
+ ***************************************************************/
+function FORMAT_ENGINEER_SHEET(sh) {
+  sh.setFrozenRows(1);
+
+  sh.getRange(
+    1,
+    1,
+    1,
+    CFG.RAW_HEADERS.length
+  )
+    .setFontWeight('bold')
+    .setBackground('#1F4E78')
+    .setFontColor('#FFFFFF');
+
+  if (sh.getLastRow() > 1) {
+    sh.getRange(
+      2,
+      4,
+      sh.getLastRow() - 1,
+      1
+    ).setNumberFormat(
+      'dd-mmm-yyyy'
+    );
+
+    sh.getRange(
+      2,
+      17,
+      sh.getLastRow() - 1,
+      1
+    ).setNumberFormat(
+      'dd-mmm-yyyy'
+    );
+
+    var statusRange = sh.getRange(
+      2,
+      16,
+      sh.getLastRow() - 1,
+      1
+    );
+
+    var rules = [];
+
+    rules.push(
+      SpreadsheetApp
+        .newConditionalFormatRule()
+        .whenTextEqualTo('Completed')
+        .setBackground('#D9EAD3')
+        .setFontColor('#274E13')
+        .setRanges([statusRange])
+        .build()
+    );
+
+    rules.push(
+      SpreadsheetApp
+        .newConditionalFormatRule()
+        .whenTextEqualTo('Pending')
+        .setBackground('#FCE8E6')
+        .setFontColor('#990000')
+        .setRanges([statusRange])
+        .build()
+    );
+
+    sh.setConditionalFormatRules(
+      rules
+    );
+  }
+
+  sh.autoResizeColumns(
+    1,
+    CFG.RAW_HEADERS.length
+  );
+}
+
+
+/***************************************************************
+ * GET ALL RAW RECORD OBJECTS
+ ***************************************************************/
+function GET_RAW_RECORDS() {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var sh = ss.getSheetByName(
+    CFG.RAW_SHEET_NAME
+  );
+
+  var records = [];
+
+  if (
+    !sh ||
+    sh.getLastRow() < 2
+  ) {
+    return records;
+  }
+
+  var data = sh.getRange(
+    2,
+    1,
+    sh.getLastRow() - 1,
+    CFG.RAW_HEADERS.length
+  ).getValues();
+
+  var i;
+
+  for (
+    i = 0;
+    i < data.length;
+    i++
+  ) {
+    var row = data[i];
+
+    if (IS_EMPTY_ROW(row)) {
+      continue;
+    }
+
+    var totalMin =
+      DURATION(
+        row[11],
+        row[12]
+      );
+
+    if (
+      totalMin === null ||
+      totalMin === undefined
+    ) {
+      totalMin =
+        PARSE_DURATION_TEXT(
+          row[13]
+        );
+    }
+
+    records.push({
+      row: row,
+
+      submissionId: row[0],
+      respondentId: row[1],
+      submittedAt: row[2],
+
+      date: row[3],
+      dateKey: DATE_KEY(row[3]),
+
+      engineer:
+        String(
+          row[4] || ''
+        ).trim(),
+
+      department:
+        String(
+          row[5] || ''
+        ).trim(),
+
+      location:
+        String(
+          row[6] || ''
+        ).trim(),
+
+      problem: row[7],
+      callReceived: row[8],
+      username: row[9],
+      actionTaken: row[10],
+
+      startTime: row[11],
+      endTime: row[12],
+
+      totalTime: row[13],
+
+      totalMinutes:
+        totalMin || 0,
+
+      category:
+        String(
+          row[14] || ''
+        ).trim(),
+
+      completed:
+        NORMALIZE_COMPLETED(
+          row[15]
+        ),
+
+      completedDate: row[16]
+    });
+  }
+
+  return records;
+}
+
+
+/***************************************************************
+ * FILTER DASHBOARD RECORDS
+ ***************************************************************/
+function FILTER_RECORDS(
+  records,
+  filters
+) {
+  var output = [];
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    var r = records[i];
+
+    if (
+      filters.engineer &&
+      filters.engineer !== 'All' &&
+      r.engineer !==
+      filters.engineer
+    ) {
+      continue;
+    }
+
+    if (
+      filters.department &&
+      filters.department !== 'All' &&
+      r.department !==
+      filters.department
+    ) {
+      continue;
+    }
+
+    if (
+      filters.location &&
+      filters.location !== 'All' &&
+      r.location !==
+      filters.location
+    ) {
+      continue;
+    }
+
+    if (
+      filters.category &&
+      filters.category !== 'All' &&
+      r.category !==
+      filters.category
+    ) {
+      continue;
+    }
+
+    /*
+     * If a date filter is supplied, records without
+     * a valid date should not pass the filter.
+     */
+    if (filters.fromDate) {
+      if (!r.dateKey) {
+        continue;
+      }
+
+      if (
+        r.dateKey <
+        filters.fromDate
+      ) {
+        continue;
+      }
+    }
+
+    if (filters.toDate) {
+      if (!r.dateKey) {
+        continue;
+      }
+
+      if (
+        r.dateKey >
+        filters.toDate
+      ) {
+        continue;
+      }
+    }
+
+    output.push(r);
+  }
+
+  return output;
+}
+
+
+/***************************************************************
+ * READ DASHBOARD FILTERS
+ ***************************************************************/
+function READ_DASHBOARD_FILTERS() {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var sh = ss.getSheetByName(
+    CFG.DASHBOARD_SHEET_NAME
+  );
+
+  if (!sh) {
+    return {
+      engineer: 'All',
+      fromDate: '',
+      toDate: '',
+      department: 'All',
+      location: 'All',
+      category: 'All'
+    };
+  }
+
+  var engineer =
+    String(
+      sh.getRange('B4').getValue() ||
+      'All'
+    ).trim();
+
+  var fromValue =
+    sh.getRange('B5').getValue();
+
+  var toValue =
+    sh.getRange('B6').getValue();
+
+  var department =
+    String(
+      sh.getRange('B7').getValue() ||
+      'All'
+    ).trim();
+
+  var location =
+    String(
+      sh.getRange('B8').getValue() ||
+      'All'
+    ).trim();
+
+  var category =
+    String(
+      sh.getRange('B9').getValue() ||
+      'All'
+    ).trim();
+
+  return {
+    engineer:
+      engineer || 'All',
+
+    fromDate:
+      DATE_KEY(fromValue),
+
+    toDate:
+      DATE_KEY(toValue),
+
+    department:
+      department || 'All',
+
+    location:
+      location || 'All',
+
+    category:
+      category || 'All'
+  };
+}
+
+
+/***************************************************************
+ * UPDATE DASHBOARD
+ ***************************************************************/
+function UPDATE_DASHBOARD() {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var sh =
+    ss.getSheetByName(
+      CFG.DASHBOARD_SHEET_NAME
+    );
+
+  if (!sh) {
+    sh = ss.insertSheet(
+      CFG.DASHBOARD_SHEET_NAME
+    );
+  }
+
+  /*
+   * Read filters BEFORE dashboard is cleared.
+   */
+  var filters =
+    READ_DASHBOARD_FILTERS();
+
+  /*
+   * Remove existing charts safely.
+   */
+  REMOVE_ALL_CHARTS(sh);
+
+  /*
+   * Remove old merged cells.
+   */
+  try {
+    sh.getRange(
+      1,
+      1,
+      Math.max(
+        sh.getMaxRows(),
+        150
+      ),
+      Math.max(
+        sh.getMaxColumns(),
+        17
+      )
+    ).breakApart();
+  } catch (mergeErr) {
+    Logger.log(
+      'Merge cleanup warning: ' +
+      mergeErr
+    );
+  }
+
+  /*
+   * Remove old filter.
+   */
+  try {
+    var oldFilter =
+      sh.getFilter();
+
+    if (oldFilter) {
+      oldFilter.remove();
+    }
+  } catch (filterErr) {
+    Logger.log(
+      'Filter cleanup warning: ' +
+      filterErr
+    );
+  }
+
+  /*
+   * Clear dashboard.
+   */
+  sh.clear();
+
+  /*
+   * Ensure enough rows.
+   */
+  if (sh.getMaxRows() < 150) {
+    sh.insertRowsAfter(
+      sh.getMaxRows(),
+      150 - sh.getMaxRows()
+    );
+  }
+
+  /*
+   * Ensure enough columns.
+   */
+  if (sh.getMaxColumns() < 17) {
+    sh.insertColumnsAfter(
+      sh.getMaxColumns(),
+      17 - sh.getMaxColumns()
+    );
+  }
+
+  /*
+   * TITLE
+   */
+  sh.getRange('A1:Q2').merge();
+
+  sh.getRange('A1')
+    .setValue(
+      'KRYSTAL GROUP - IT HELPDESK DAILY DASHBOARD'
+    )
+    .setFontSize(20)
+    .setFontWeight('bold')
+    .setFontColor('#FFFFFF')
+    .setBackground('#17365D')
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle');
+
+  sh.getRange('A3:Q3').merge();
+
+  sh.getRange('A3')
+    .setValue(
+      'Live synchronized view | Tally → Raw_Data → Engineer Sheets → Dashboard'
+    )
+    .setFontSize(10)
+    .setFontColor('#666666')
+    .setHorizontalAlignment('center');
+
+  /*
+   * FILTER AREA
+   */
+  BUILD_DASHBOARD_FILTERS(
+    sh,
+    filters
+  );
+
+  /*
+   * DATA
+   */
+  var allRecords =
+    GET_RAW_RECORDS();
+
+  var records =
+    FILTER_RECORDS(
+      allRecords,
+      filters
+    );
+
+  /*
+   * KPI CALCULATIONS
+   */
+  var totalCalls =
+    records.length;
+
+  var completedCalls = 0;
+  var pendingCalls = 0;
+  var totalMinutes = 0;
+
+  var activeEngineerSet = {};
+
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    if (
+      records[i].completed ===
+      'Completed'
+    ) {
+      completedCalls++;
+    } else {
+      pendingCalls++;
+    }
+
+    totalMinutes += Number(
+      records[i].totalMinutes || 0
+    );
+
+    if (records[i].engineer) {
+      activeEngineerSet[
+        records[i].engineer
+      ] = true;
+    }
+  }
+
+  var completionPercent =
+    totalCalls > 0
+      ? completedCalls / totalCalls
+      : 0;
+
+  var avgMinutes =
+    totalCalls > 0
+      ? totalMinutes / totalCalls
+      : 0;
+
+  var todayKey =
+    Utilities.formatDate(
+      new Date(),
+      CFG.TIMEZONE,
+      'yyyy-MM-dd'
+    );
+
+  var callsToday = 0;
+  var completedToday = 0;
+  var pendingToday = 0;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    if (
+      records[i].dateKey ===
+      todayKey
+    ) {
+      callsToday++;
+
+      if (
+        records[i].completed ===
+        'Completed'
+      ) {
+        completedToday++;
+      } else {
+        pendingToday++;
+      }
+    }
+  }
+
+  /*
+   * KPI CARDS
+   */
+  BUILD_KPI_CARDS(
+    sh,
+    [
+      [
+        'Total Calls',
+        totalCalls,
+        '#D9EAF7'
+      ],
+      [
+        'Completed Calls',
+        completedCalls,
+        '#D9EAD3'
+      ],
+      [
+        'Pending Calls',
+        pendingCalls,
+        '#FCE8E6'
+      ],
+      [
+        'Completion %',
+        Math.round(
+          completionPercent * 100
+        ) + '%',
+        '#FFF2CC'
+      ],
+      [
+        'Total Working Time',
+        MINUTES_TO_TEXT(
+          totalMinutes
+        ),
+        '#EADCF8'
+      ],
+      [
+        'Avg Time / Call',
+        MINUTES_TO_TEXT(
+          avgMinutes
+        ),
+        '#DDEBF7'
+      ],
+      [
+        'Active Engineers',
+        Object.keys(
+          activeEngineerSet
+        ).length,
+        '#E2F0D9'
+      ],
+      [
+        'Calls Today',
+        callsToday,
+        '#FCE4D6'
+      ],
+      [
+        'Completed Today',
+        completedToday,
+        '#D9EAD3'
+      ],
+      [
+        'Pending Today',
+        pendingToday,
+        '#F4CCCC'
+      ]
+    ]
+  );
+
+  /*
+   * SUMMARY TABLES
+   */
+  var engineerEnd =
+    BUILD_ENGINEER_SUMMARY(
+      sh,
+      records
+    );
+
+  var statusEnd =
+    BUILD_STATUS_SUMMARY(
+      sh,
+      records
+    );
+
+  var categoryEnd =
+    BUILD_CATEGORY_SUMMARY(
+      sh,
+      records
+    );
+
+  var locationEnd =
+    BUILD_LOCATION_SUMMARY(
+      sh,
+      records
+    );
+
+  var dailyEnd =
+    BUILD_DAILY_SUMMARY(
+      sh,
+      records
+    );
+
+  var departmentEnd =
+    BUILD_DEPARTMENT_SUMMARY(
+      sh,
+      records
+    );
+
+  /*
+   * SCOPE INFORMATION
+   */
+  BUILD_SCOPE_SUMMARY(
+    sh,
+    filters,
+    allRecords.length,
+    records.length
+  );
+
+  /*
+   * CHARTS
+   */
+  CREATE_DASHBOARD_CHARTS(
+    sh,
+    statusEnd,
+    engineerEnd,
+    dailyEnd,
+    categoryEnd
+  );
+
+  /*
+   * FILTERED DETAILS
+   */
+  var detailStart =
+    Math.max(
+      92,
+      dailyEnd + 3,
+      locationEnd + 3,
+      departmentEnd + 3
+    );
+
+  BUILD_FILTERED_DETAILS(
+    sh,
+    records,
+    detailStart
+  );
+
+  /*
+   * FORMAT
+   */
+  FORMAT_DASHBOARD(
+    sh,
+    detailStart
+  );
+
+  /*
+   * Reapply filter values after clear().
+   */
+  sh.getRange('B4')
+    .setValue(
+      filters.engineer || 'All'
+    );
+
+  if (filters.fromDate) {
+    var fromDateObject =
+      TO_DATE(
+        filters.fromDate
+      );
+
+    if (fromDateObject) {
+      sh.getRange('B5')
+        .setValue(
+          fromDateObject
+        );
+    }
+  }
+
+  if (filters.toDate) {
+    var toDateObject =
+      TO_DATE(
+        filters.toDate
+      );
+
+    if (toDateObject) {
+      sh.getRange('B6')
+        .setValue(
+          toDateObject
+        );
+    }
+  }
+
+  sh.getRange('B7')
+    .setValue(
+      filters.department || 'All'
+    );
+
+  sh.getRange('B8')
+    .setValue(
+      filters.location || 'All'
+    );
+
+  sh.getRange('B9')
+    .setValue(
+      filters.category || 'All'
+    );
+
+  APPLY_DASHBOARD_VALIDATIONS(sh);
+
+  /*
+   * Refresh timestamp.
+   */
+  sh.getRange('P4:Q5').merge();
+
+  sh.getRange('P4')
+    .setValue(
+      'Last refreshed\n' +
+      Utilities.formatDate(
+        new Date(),
+        CFG.TIMEZONE,
+        'dd-MMM-yyyy HH:mm:ss'
+      )
+    )
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle')
+    .setBackground('#EAF2F8')
+    .setFontWeight('bold')
+    .setFontColor('#17365D');
+
+  SpreadsheetApp.flush();
+
+  Logger.log(
+    'Dashboard updated. Filtered records: ' +
+    records.length
+  );
+}
+
+
+/***************************************************************
+ * DASHBOARD FILTER AREA
+ ***************************************************************/
+function BUILD_DASHBOARD_FILTERS(
+  sh,
+  filters
+) {
+  sh.getRange('A4:A9')
+    .setValues([
+      ['Engineer'],
+      ['From Date'],
+      ['To Date'],
+      ['Department'],
+      ['Location'],
+      ['Call Category']
+    ])
+    .setFontWeight('bold')
+    .setBackground('#D9EAF7')
+    .setFontColor('#17365D');
+
+  sh.getRange('B4:B9')
+    .setBackground('#FFFFFF')
+    .setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+
+  sh.getRange('B4')
+    .setValue(
+      filters.engineer || 'All'
+    );
+
+  if (filters.fromDate) {
+    var fromDate =
+      TO_DATE(
+        filters.fromDate
+      );
+
+    if (fromDate) {
+      sh.getRange('B5')
+        .setValue(fromDate);
+    }
+  }
+
+  if (filters.toDate) {
+    var toDate =
+      TO_DATE(
+        filters.toDate
+      );
+
+    if (toDate) {
+      sh.getRange('B6')
+        .setValue(toDate);
+    }
+  }
+
+  sh.getRange('B7')
+    .setValue(
+      filters.department || 'All'
+    );
+
+  sh.getRange('B8')
+    .setValue(
+      filters.location || 'All'
+    );
+
+  sh.getRange('B9')
+    .setValue(
+      filters.category || 'All'
+    );
+
+  sh.getRange('D4:O9').merge();
+
+  sh.getRange('D4')
+    .setValue(
+      'INTERACTIVE FILTERS\n' +
+      'Change Engineer / Date / Department / Location / Call Category to refresh all KPIs, tables and charts automatically.\n' +
+      'Use the Krystal IT Helpdesk menu for a full synchronization.'
+    )
+    .setWrap(true)
+    .setVerticalAlignment('middle')
+    .setBackground('#F3F6F9')
+    .setFontColor('#44546A');
+}
+
+
+/***************************************************************
+ * KPI CARDS
+ ***************************************************************/
+function BUILD_KPI_CARDS(
+  sh,
+  kpis
+) {
+  var positions = [
+    'A11:C14',
+    'D11:F14',
+    'G11:I14',
+    'J11:L14',
+    'M11:O14',
+    'A16:C19',
+    'D16:F19',
+    'G16:I19',
+    'J16:L19',
+    'M16:O19'
+  ];
+
+  var i;
+
+  for (
+    i = 0;
+    i < kpis.length;
+    i++
+  ) {
+    var range =
+      sh.getRange(
+        positions[i]
+      );
+
+    range
+      .setBackground(
+        kpis[i][2]
+      )
+      .setBorder(
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        '#B7B7B7',
+        SpreadsheetApp.BorderStyle.SOLID
+      )
+      .setVerticalAlignment(
+        'middle'
+      );
+
+    range
+      .getCell(1, 1)
+      .setValue(
+        kpis[i][0]
+      )
+      .setFontSize(10)
+      .setFontWeight('bold')
+      .setFontColor('#44546A');
+
+    range
+      .getCell(2, 1)
+      .setValue(
+        kpis[i][1]
+      )
+      .setFontSize(20)
+      .setFontWeight('bold')
+      .setFontColor('#17365D');
+
+    range
+      .getCell(3, 1)
+      .setValue('');
+
+    range
+      .getCell(4, 1)
+      .setValue('');
+  }
+}
+
+
+/***************************************************************
+ * ENGINEER SUMMARY
+ ***************************************************************/
+function BUILD_ENGINEER_SUMMARY(
+  sh,
+  records
+) {
+  var startRow = 22;
+
+  sh.getRange(
+    startRow,
+    1,
+    1,
+    6
+  ).setValues([
+    [
+      'Engineer',
+      'Calls',
+      'Completed',
+      'Pending',
+      'Working Time',
+      'Last Call Date'
+    ]
+  ]);
+
+  var map = {};
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    var name =
+      records[i].engineer ||
+      'Unassigned';
+
+    if (!map[name]) {
+      map[name] = {
+        calls: 0,
+        completed: 0,
+        pending: 0,
+        minutes: 0,
+        lastDate: ''
+      };
+    }
+
+    map[name].calls++;
+
+    if (
+      records[i].completed ===
+      'Completed'
+    ) {
+      map[name].completed++;
+    } else {
+      map[name].pending++;
+    }
+
+    map[name].minutes +=
+      Number(
+        records[i].totalMinutes || 0
+      );
+
+    if (
+      records[i].dateKey &&
+      (
+        !map[name].lastDate ||
+        records[i].dateKey >
+        map[name].lastDate
+      )
+    ) {
+      map[name].lastDate =
+        records[i].dateKey;
+    }
+  }
+
+  var names =
+    SORT_OBJECT_KEYS(map);
+
+  var output = [];
+
+  for (
+    i = 0;
+    i < names.length;
+    i++
+  ) {
+    var x = map[names[i]];
+
+    output.push([
+      names[i],
+      x.calls,
+      x.completed,
+      x.pending,
+      MINUTES_TO_TEXT(
+        x.minutes
+      ),
+      x.lastDate
+        ? TO_DATE(x.lastDate)
+        : ''
+    ]);
+  }
+
+  if (output.length > 0) {
+    sh.getRange(
+      startRow + 1,
+      1,
+      output.length,
+      6
+    ).setValues(output);
+
+    sh.getRange(
+      startRow + 1,
+      6,
+      output.length,
+      1
+    ).setNumberFormat(
+      'dd-mmm-yyyy'
+    );
+  } else {
+    sh.getRange(
+      startRow + 1,
+      1
+    ).setValue('No data');
+  }
+
+  return startRow +
+    Math.max(
+      output.length,
+      1
+    );
+}
+
+
+/***************************************************************
+ * STATUS SUMMARY
+ ***************************************************************/
+function BUILD_STATUS_SUMMARY(
+  sh,
+  records
+) {
+  var startRow = 32;
+
+  sh.getRange(
+    startRow,
+    1,
+    1,
+    2
+  ).setValues([
+    [
+      'Status',
+      'Calls'
+    ]
+  ]);
+
+  var completed = 0;
+  var pending = 0;
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    if (
+      records[i].completed ===
+      'Completed'
+    ) {
+      completed++;
+    } else {
+      pending++;
+    }
+  }
+
+  sh.getRange(
+    startRow + 1,
+    1,
+    2,
+    2
+  ).setValues([
+    [
+      'Completed',
+      completed
+    ],
+    [
+      'Pending',
+      pending
+    ]
+  ]);
+
+  return startRow + 2;
+}
+
+
+/***************************************************************
+ * CATEGORY SUMMARY
+ ***************************************************************/
+function BUILD_CATEGORY_SUMMARY(
+  sh,
+  records
+) {
+  var startRow = 38;
+
+  sh.getRange(
+    startRow,
+    1,
+    1,
+    2
+  ).setValues([
+    [
+      'Call Category',
+      'Calls'
+    ]
+  ]);
+
+  var map = {};
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    var category =
+      records[i].category ||
+      'Uncategorized';
+
+    if (!map[category]) {
+      map[category] = 0;
+    }
+
+    map[category]++;
+  }
+
+  var keys =
+    SORT_OBJECT_KEYS(map);
+
+  var output = [];
+
+  for (
+    i = 0;
+    i < keys.length;
+    i++
+  ) {
+    output.push([
+      keys[i],
+      map[keys[i]]
+    ]);
+  }
+
+  if (output.length > 0) {
+    sh.getRange(
+      startRow + 1,
+      1,
+      output.length,
+      2
+    ).setValues(output);
+  } else {
+    sh.getRange(
+      startRow + 1,
+      1
+    ).setValue('No data');
+  }
+
+  return startRow +
+    Math.max(
+      output.length,
+      1
+    );
+}
+
+
+/***************************************************************
+ * LOCATION SUMMARY
+ ***************************************************************/
+function BUILD_LOCATION_SUMMARY(
+  sh,
+  records
+) {
+  var startRow = 38;
+
+  sh.getRange(
+    startRow,
+    4,
+    1,
+    2
+  ).setValues([
+    [
+      'Location',
+      'Calls'
+    ]
+  ]);
+
+  var map = {};
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    var location =
+      records[i].location ||
+      'Unknown';
+
+    if (!map[location]) {
+      map[location] = 0;
+    }
+
+    map[location]++;
+  }
+
+  var keys =
+    SORT_OBJECT_KEYS(map);
+
+  var output = [];
+
+  for (
+    i = 0;
+    i < keys.length;
+    i++
+  ) {
+    output.push([
+      keys[i],
+      map[keys[i]]
+    ]);
+  }
+
+  if (output.length > 0) {
+    sh.getRange(
+      startRow + 1,
+      4,
+      output.length,
+      2
+    ).setValues(output);
+  } else {
+    sh.getRange(
+      startRow + 1,
+      4
+    ).setValue('No data');
+  }
+
+  return startRow +
+    Math.max(
+      output.length,
+      1
+    );
+}
+
+
+/***************************************************************
+ * DAILY SUMMARY
+ ***************************************************************/
+function BUILD_DAILY_SUMMARY(
+  sh,
+  records
+) {
+  var startRow = 54;
+
+  sh.getRange(
+    startRow,
+    1,
+    1,
+    3
+  ).setValues([
+    [
+      'Date',
+      'Calls',
+      'Completed'
+    ]
+  ]);
+
+  var map = {};
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    var key =
+      records[i].dateKey;
+
+    if (!key) {
+      continue;
+    }
+
+    if (!map[key]) {
+      map[key] = {
+        calls: 0,
+        completed: 0
+      };
+    }
+
+    map[key].calls++;
+
+    if (
+      records[i].completed ===
+      'Completed'
+    ) {
+      map[key].completed++;
+    }
+  }
+
+  var keys =
+    Object.keys(map);
+
+  keys.sort();
+
+  var output = [];
+
+  for (
+    i = 0;
+    i < keys.length;
+    i++
+  ) {
+    output.push([
+      TO_DATE(keys[i]),
+      map[keys[i]].calls,
+      map[keys[i]].completed
+    ]);
+  }
+
+  if (output.length > 0) {
+    sh.getRange(
+      startRow + 1,
+      1,
+      output.length,
+      3
+    ).setValues(output);
+
+    sh.getRange(
+      startRow + 1,
+      1,
+      output.length,
+      1
+    ).setNumberFormat(
+      'dd-mmm'
+    );
+  } else {
+    sh.getRange(
+      startRow + 1,
+      1
+    ).setValue('No data');
+  }
+
+  return startRow +
+    Math.max(
+      output.length,
+      1
+    );
+}
+
+
+/***************************************************************
+ * DEPARTMENT SUMMARY
+ ***************************************************************/
+function BUILD_DEPARTMENT_SUMMARY(
+  sh,
+  records
+) {
+  var startRow = 54;
+
+  sh.getRange(
+    startRow,
+    4,
+    1,
+    2
+  ).setValues([
+    [
+      'Department',
+      'Calls'
+    ]
+  ]);
+
+  var map = {};
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    var dept =
+      records[i].department ||
+      'Unknown';
+
+    if (!map[dept]) {
+      map[dept] = 0;
+    }
+
+    map[dept]++;
+  }
+
+  var keys =
+    SORT_OBJECT_KEYS(map);
+
+  var output = [];
+
+  for (
+    i = 0;
+    i < keys.length;
+    i++
+  ) {
+    output.push([
+      keys[i],
+      map[keys[i]]
+    ]);
+  }
+
+  if (output.length > 0) {
+    sh.getRange(
+      startRow + 1,
+      4,
+      output.length,
+      2
+    ).setValues(output);
+  } else {
+    sh.getRange(
+      startRow + 1,
+      4
+    ).setValue('No data');
+  }
+
+  return startRow +
+    Math.max(
+      output.length,
+      1
+    );
+}
+
+
+/***************************************************************
+ * SCOPE SUMMARY
+ ***************************************************************/
+function BUILD_SCOPE_SUMMARY(
+  sh,
+  filters,
+  totalRecords,
+  filteredRecords
+) {
+  sh.getRange('P7:Q10')
+    .setValues([
+      [
+        'Data Scope',
+        'Value'
+      ],
+      [
+        'All Raw Records',
+        totalRecords
+      ],
+      [
+        'Filtered Records',
+        filteredRecords
+      ],
+      [
+        'Sync Source',
+        'Tally → Raw_Data'
+      ]
+    ])
+    .setBackground('#F3F6F9');
+
+  sh.getRange('P7:Q7')
+    .setFontWeight('bold')
+    .setBackground('#D9EAF7');
+}
+
+
+/***************************************************************
+ * REMOVE ALL CHARTS
+ *
+ * DO NOT USE clearCharts().
+ ***************************************************************/
+function REMOVE_ALL_CHARTS(sh) {
+  var charts =
+    sh.getCharts();
+
+  var i;
+
+  for (
+    i = 0;
+    i < charts.length;
+    i++
+  ) {
+    sh.removeChart(
+      charts[i]
+    );
+  }
+}
+
+
+/***************************************************************
+ * CREATE DASHBOARD CHARTS
+ ***************************************************************/
+function CREATE_DASHBOARD_CHARTS(
+  sh,
+  statusEnd,
+  engineerEnd,
+  dailyEnd,
+  categoryEnd
+) {
+  /*
+   * STATUS DONUT
+   */
+  var statusChart =
+    sh.newChart()
+      .setChartType(
+        Charts.ChartType.PIE
+      )
+      .addRange(
+        sh.getRange(
+          'A32:B34'
+        )
+      )
+      .setPosition(
+        22,
+        8,
+        0,
+        0
+      )
+      .setOption(
+        'title',
+        'Completed vs Pending'
+      )
+      .setOption(
+        'pieHole',
+        0.55
+      )
+      .setOption(
+        'legend',
+        {
+          position: 'right'
+        }
+      )
+      .setOption(
+        'width',
+        520
+      )
+      .setOption(
+        'height',
+        270
+      )
+      .build();
+
+  sh.insertChart(
+    statusChart
+  );
+
+  /*
+   * ENGINEER PERFORMANCE
+   */
+  if (engineerEnd >= 23) {
+    var engineerChart =
+      sh.newChart()
+        .setChartType(
+          Charts.ChartType.COLUMN
+        )
+        .addRange(
+          sh.getRange(
+            22,
+            1,
+            engineerEnd - 21,
+            3
+          )
+        )
+        .setPosition(
+          39,
+          8,
+          0,
+          0
+        )
+        .setOption(
+          'title',
+          'Engineer Calls vs Completed'
+        )
+        .setOption(
+          'legend',
+          {
+            position: 'bottom'
+          }
+        )
+        .setOption(
+          'width',
+          520
+        )
+        .setOption(
+          'height',
+          270
+        )
+        .build();
+
+    sh.insertChart(
+      engineerChart
+    );
+  }
+
+  /*
+   * DAILY TREND
+   */
+  if (dailyEnd >= 56) {
+    var dailyChart =
+      sh.newChart()
+        .setChartType(
+          Charts.ChartType.LINE
+        )
+        .addRange(
+          sh.getRange(
+            54,
+            1,
+            dailyEnd - 53,
+            3
+          )
+        )
+        .setPosition(
+          56,
+          8,
+          0,
+          0
+        )
+        .setOption(
+          'title',
+          'Daily Call Trend'
+        )
+        .setOption(
+          'legend',
+          {
+            position: 'bottom'
+          }
+        )
+        .setOption(
+          'width',
+          520
+        )
+        .setOption(
+          'height',
+          270
+        )
+        .build();
+
+    sh.insertChart(
+      dailyChart
+    );
+  }
+
+  /*
+   * CATEGORY
+   */
+  if (categoryEnd >= 39) {
+    var categoryChart =
+      sh.newChart()
+        .setChartType(
+          Charts.ChartType.BAR
+        )
+        .addRange(
+          sh.getRange(
+            38,
+            1,
+            categoryEnd - 37,
+            2
+          )
+        )
+        .setPosition(
+          73,
+          8,
+          0,
+          0
+        )
+        .setOption(
+          'title',
+          'Calls by Category'
+        )
+        .setOption(
+          'legend',
+          {
+            position: 'none'
+          }
+        )
+        .setOption(
+          'width',
+          520
+        )
+        .setOption(
+          'height',
+          270
+        )
+        .build();
+
+    sh.insertChart(
+      categoryChart
+    );
+  }
+}
+
+
+/***************************************************************
+ * FILTERED DETAILS
+ ***************************************************************/
+function BUILD_FILTERED_DETAILS(
+  sh,
+  records,
+  startRow
+) {
+  sh.getRange(
+    startRow,
+    1,
+    1,
+    CFG.RAW_HEADERS.length
+  ).setValues([
+    CFG.RAW_HEADERS
+  ]);
+
+  sh.getRange(
+    startRow,
+    1,
+    1,
+    CFG.RAW_HEADERS.length
+  )
+    .setFontWeight('bold')
+    .setBackground('#17365D')
+    .setFontColor('#FFFFFF');
+
+  if (records.length === 0) {
+    sh.getRange(
+      startRow + 1,
+      1
+    ).setValue(
+      'No records match the selected filters.'
+    );
+
+    return;
+  }
+
+  var rows = [];
+  var i;
+
+  for (
+    i = 0;
+    i < records.length;
+    i++
+  ) {
+    rows.push(
+      records[i].row
+    );
+  }
+
+  /*
+   * Sort latest valid date first.
+   */
+  rows.sort(function(a, b) {
+    var da =
+      DATE_KEY(a[3]);
+
+    var db =
+      DATE_KEY(b[3]);
+
+    if (!da && !db) {
+      return 0;
+    }
+
+    if (!da) {
+      return 1;
+    }
+
+    if (!db) {
+      return -1;
+    }
+
+    if (da < db) {
+      return 1;
+    }
+
+    if (da > db) {
+      return -1;
+    }
+
+    return 0;
+  });
+
+  sh.getRange(
+    startRow + 1,
+    1,
+    rows.length,
+    CFG.RAW_HEADERS.length
+  ).setValues(rows);
+
+  sh.getRange(
+    startRow + 1,
+    4,
+    rows.length,
+    1
+  ).setNumberFormat(
+    'dd-mmm-yyyy'
+  );
+
+  sh.getRange(
+    startRow + 1,
+    17,
+    rows.length,
+    1
+  ).setNumberFormat(
+    'dd-mmm-yyyy'
+  );
+
+  try {
+    sh.getRange(
+      startRow,
+      1,
+      rows.length + 1,
+      CFG.RAW_HEADERS.length
+    ).createFilter();
+  } catch (e) {
+    Logger.log(
+      'Details filter warning: ' +
+      e
+    );
+  }
+}
+
+
+/***************************************************************
+ * FORMAT DASHBOARD
+ ***************************************************************/
+function FORMAT_DASHBOARD(
+  sh,
+  detailStart
+) {
+  sh.setFrozenRows(3);
+
+  var widths = {
+    1: 125,
+    2: 115,
+    3: 105,
+    4: 120,
+    5: 105,
+    6: 105,
+    7: 22,
+    8: 110,
+    9: 110,
+    10: 110,
+    11: 110,
+    12: 110,
+    13: 110,
+    14: 110,
+    15: 110,
+    16: 100,
+    17: 100
+  };
+
+  var col;
+
+  for (col in widths) {
+    sh.setColumnWidth(
+      parseInt(
+        col,
+        10
+      ),
+      widths[col]
+    );
+  }
+
+  sh.setRowHeight(
+    1,
+    32
+  );
+
+  sh.setRowHeight(
+    2,
+    32
+  );
+
+  sh.setRowHeight(
+    3,
+    22
+  );
+
+  var r;
+
+  for (
+    r = 11;
+    r <= 19;
+    r++
+  ) {
+    sh.setRowHeight(
+      r,
+      26
+    );
+  }
+
+  sh.getRange('B5:B6')
+    .setNumberFormat(
+      'dd-mmm-yyyy'
+    );
+
+  sh.getRange(
+    1,
+    1,
+    Math.min(
+      sh.getMaxRows(),
+      detailStart + 20
+    ),
+    17
+  ).setFontFamily(
+    'Arial'
+  );
+
+  var headerRanges = [
+    'A22:F22',
+    'A32:B32',
+    'A38:B38',
+    'D38:E38',
+    'A54:C54',
+    'D54:E54'
+  ];
+
+  for (
+    r = 0;
+    r < headerRanges.length;
+    r++
+  ) {
+    sh.getRange(
+      headerRanges[r]
+    )
+      .setFontWeight('bold')
+      .setBackground('#D9EAF7')
+      .setFontColor('#17365D');
+  }
+
+  sh.getRange(
+    'B23:E100'
+  ).setHorizontalAlignment(
+    'center'
+  );
+
+  if (
+    detailStart <
+    sh.getMaxRows()
+  ) {
+    var statusRange =
+      sh.getRange(
+        detailStart + 1,
+        16,
+        Math.max(
+          1,
+          sh.getMaxRows() -
+          detailStart
+        ),
+        1
+      );
+
+    var rules = [];
+
+    rules.push(
+      SpreadsheetApp
+        .newConditionalFormatRule()
+        .whenTextEqualTo('Completed')
+        .setBackground('#D9EAD3')
+        .setFontColor('#274E13')
+        .setRanges([statusRange])
+        .build()
+    );
+
+    rules.push(
+      SpreadsheetApp
+        .newConditionalFormatRule()
+        .whenTextEqualTo('Pending')
+        .setBackground('#FCE8E6')
+        .setFontColor('#990000')
+        .setRanges([statusRange])
+        .build()
+    );
+
+    sh.setConditionalFormatRules(
+      rules
+    );
+  }
+}
+
+
+/***************************************************************
+ * APPLY DASHBOARD VALIDATIONS
+ ***************************************************************/
+function APPLY_DASHBOARD_VALIDATIONS(sh) {
+  var ss = SpreadsheetApp.openById(
+    CFG.SPREADSHEET_ID
+  );
+
+  var lists =
+    ss.getSheetByName(
+      CFG.LISTS_SHEET_NAME
+    );
+
+  if (!lists) {
+    return;
+  }
+
+  var lastRow =
+    Math.max(
+      2,
+      lists.getLastRow()
+    );
+
+  try {
+    var engineerRule =
+      SpreadsheetApp
+        .newDataValidation()
+        .requireValueInRange(
+          lists.getRange(
+            2,
+            1,
+            lastRow - 1,
+            1
+          ),
+          true
+        )
+        .setAllowInvalid(false)
+        .build();
+
+    sh.getRange('B4')
+      .setDataValidation(
+        engineerRule
+      );
+
+    var departmentRule =
+      SpreadsheetApp
+        .newDataValidation()
+        .requireValueInRange(
+          lists.getRange(
+            2,
+            2,
+            lastRow - 1,
+            1
+          ),
+          true
+        )
+        .setAllowInvalid(false)
+        .build();
+
+    sh.getRange('B7')
+      .setDataValidation(
+        departmentRule
+      );
+
+    var locationRule =
+      SpreadsheetApp
+        .newDataValidation()
+        .requireValueInRange(
+          lists.getRange(
+            2,
+            3,
+            lastRow - 1,
+            1
+          ),
+          true
+        )
+        .setAllowInvalid(false)
+        .build();
+
+    sh.getRange('B8')
+      .setDataValidation(
+        locationRule
+      );
+
+    var categoryRule =
+      SpreadsheetApp
+        .newDataValidation()
+        .requireValueInRange(
+          lists.getRange(
+            2,
+            4,
+            lastRow - 1,
+            1
+          ),
+          true
+        )
+        .setAllowInvalid(false)
+        .build();
+
+    sh.getRange('B9')
+      .setDataValidation(
+        categoryRule
+      );
+
+    var dateRule =
+      SpreadsheetApp
+        .newDataValidation()
+        .requireDate()
+        .setAllowInvalid(true)
+        .build();
+
+    sh.getRange('B5:B6')
+      .setDataValidation(
+        dateRule
+      );
+
+  } catch (err) {
+    Logger.log(
+      'Dashboard validation warning: ' +
+      err
+    );
+  }
+}
+
+
+/***************************************************************
+ * RESET DASHBOARD FILTERS
+ ***************************************************************/
+function RESET_DASHBOARD_FILTERS() {
+  var ss =
+    SpreadsheetApp.openById(
+      CFG.SPREADSHEET_ID
+    );
+
+  var sh =
+    ss.getSheetByName(
+      CFG.DASHBOARD_SHEET_NAME
+    );
+
+  if (!sh) {
+    return;
+  }
+
+  sh.getRange('B4:B9')
+    .clearContent();
+
+  sh.getRange('B4')
+    .setValue('All');
+
+  sh.getRange('B7')
+    .setValue('All');
+
+  sh.getRange('B8')
+    .setValue('All');
+
+  sh.getRange('B9')
+    .setValue('All');
+
+  UPDATE_DASHBOARD();
+}
+
+
+/***************************************************************
+ * INTERACTIVE DASHBOARD
+ ***************************************************************/
+function onEdit(e) {
+  try {
+    if (
+      !e ||
+      !e.range
+    ) {
+      return;
+    }
+
+    var sh =
+      e.range.getSheet();
+
+    if (
+      sh.getName() !==
+      CFG.DASHBOARD_SHEET_NAME
+    ) {
+      return;
+    }
+
+    var row =
+      e.range.getRow();
+
+    var col =
+      e.range.getColumn();
+
+    /*
+     * Dashboard filters are B4:B9.
+     */
+    if (
+      col === 2 &&
+      row >= 4 &&
+      row <= 9
+    ) {
+      UPDATE_DASHBOARD();
+    }
+
+  } catch (err) {
+    Logger.log(
+      'onEdit error: ' +
+      err
+    );
+  }
+}
+
+
+/***************************************************************
+ * MINUTES TO TEXT
+ ***************************************************************/
+function MINUTES_TO_TEXT(minutes) {
+  minutes =
+    Math.round(
+      Number(
+        minutes || 0
+      )
+    );
+
+  if (minutes <= 0) {
+    return '0 min';
+  }
+
+  var hours =
+    Math.floor(
+      minutes / 60
+    );
+
+  var mins =
+    minutes % 60;
+
+  if (
+    hours > 0 &&
+    mins > 0
+  ) {
+    return (
+      hours +
+      ' hr ' +
+      mins +
+      ' min'
+    );
+  }
+
+  if (hours > 0) {
+    return hours + ' hr';
+  }
+
+  return mins + ' min';
+}
+
+
+/***************************************************************
+ * INSTALL / REPAIR TRIGGERS
+ ***************************************************************/
+function INSTALL_TRIGGERS() {
+  var triggers =
+    ScriptApp.getProjectTriggers();
+
+  var i;
+
+  for (
+    i = 0;
+    i < triggers.length;
+    i++
+  ) {
+    var handler =
+      triggers[i]
+        .getHandlerFunction();
+
+    if (
+      handler === 'AUTO_SYNC' ||
+      handler === 'SEND_REMINDERS'
+    ) {
+      ScriptApp.deleteTrigger(
+        triggers[i]
+      );
+    }
+  }
+
+  ScriptApp.newTrigger(
+    'AUTO_SYNC'
+  )
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+
+  ScriptApp.newTrigger(
+    'SEND_REMINDERS'
+  )
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+
+  Logger.log(
+    'AUTO_SYNC trigger installed.'
+  );
+
+  Logger.log(
+    'SEND_REMINDERS trigger installed.'
+  );
+}
+
+
+/***************************************************************
+ * SEND REMINDERS
+ ***************************************************************/
+function SEND_REMINDERS() {
+  try {
+    var now = new Date();
+
+    var dayNumber =
+      parseInt(
+        Utilities.formatDate(
+          now,
+          CFG.TIMEZONE,
+          'u'
+        ),
+        10
+      );
+
+    /*
+     * Monday = 1
+     * Saturday = 6
+     * Sunday = 7
+     */
+    if (
+      dayNumber < 1 ||
+      dayNumber > 6
+    ) {
+      return;
+    }
+
+    var hour =
+      parseInt(
+        Utilities.formatDate(
+          now,
+          CFG.TIMEZONE,
+          'H'
+        ),
+        10
+      );
+
+    var minute =
+      parseInt(
+        Utilities.formatDate(
+          now,
+          CFG.TIMEZONE,
+          'm'
+        ),
+        10
+      );
+
+    /*
+     * Do not send before 5 PM.
+     */
+    if (
+      hour <
+      CFG.REMINDER_HOUR
+    ) {
+      return;
+    }
+
+    if (
+      hour ===
+      CFG.REMINDER_HOUR &&
+      minute <
+      CFG.REMINDER_MINUTE
+    ) {
+      return;
+    }
+
+    var todayKey =
+      Utilities.formatDate(
+        now,
+        CFG.TIMEZONE,
+        'yyyy-MM-dd'
+      );
+
+    var records =
+      GET_RAW_RECORDS();
+
+    var i;
+
+    for (
+      i = 0;
+      i < CFG.ENGINEERS.length;
+      i++
+    ) {
+      var engineer =
+        CFG.ENGINEERS[i];
+
+      var todayRecords = [];
+      var j;
+
+      for (
+        j = 0;
+        j < records.length;
+        j++
+      ) {
+        if (
+          records[j].dateKey ===
+          todayKey &&
+          String(
+            records[j].engineer
+          )
+            .trim()
+            .toLowerCase() ===
+          engineer.name
+            .trim()
+            .toLowerCase()
+        ) {
+          todayRecords.push(
+            records[j]
+          );
+        }
+      }
+
+      var shouldRemind = false;
+      var reason = '';
+
+      if (
+        todayRecords.length === 0
+      ) {
+        shouldRemind = true;
+        reason =
+          'No report submitted today';
+
+      } else {
+        var pending = 0;
+
+        for (
+          j = 0;
+          j < todayRecords.length;
+          j++
+        ) {
+          if (
+            todayRecords[j].completed !==
+            'Completed'
+          ) {
+            pending++;
+          }
+        }
+
+        if (pending > 0) {
+          shouldRemind = true;
+
+          reason =
+            pending +
+            ' pending report(s)';
+        } else {
+          shouldRemind = false;
+
+          reason =
+            'All today reports completed';
+        }
+      }
+
+      if (
+        shouldRemind &&
+        !HAS_REMINDER_BEEN_SENT(
+          todayKey,
+          engineer.name
+        )
+      ) {
+        SEND_ENGINEER_REMINDER(
+          engineer,
+          todayRecords,
+          reason,
+          todayKey
+        );
+      }
+    }
+
+  } catch (err) {
+    Logger.log(
+      'SEND_REMINDERS ERROR: ' +
+      err
+    );
+  }
+}
+
+
+/***************************************************************
+ * CHECK REMINDER LOG
+ ***************************************************************/
+function HAS_REMINDER_BEEN_SENT(
+  dateKey,
+  engineerName
+) {
+  var ss =
+    SpreadsheetApp.openById(
+      CFG.SPREADSHEET_ID
+    );
+
+  var sh =
+    ss.getSheetByName(
+      CFG.REMINDER_LOG_SHEET_NAME
+    );
+
+  if (
+    !sh ||
+    sh.getLastRow() < 2
+  ) {
+    return false;
+  }
+
+  var values =
+    sh.getRange(
+      2,
+      1,
+      sh.getLastRow() - 1,
+      5
+    ).getValues();
+
+  var i;
+
+  for (
+    i = 0;
+    i < values.length;
+    i++
+  ) {
+    if (
+      String(
+        values[i][1]
+      ) === dateKey &&
+      String(
+        values[i][2]
+      )
+        .toLowerCase() ===
+      String(
+        engineerName
+      )
+        .toLowerCase() &&
+      String(
+        values[i][4]
+      ) === 'SENT'
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+/***************************************************************
+ * SEND ENGINEER REMINDER
+ ***************************************************************/
+function SEND_ENGINEER_REMINDER(
+  engineer,
+  todayRecords,
+  reason,
+  dateKey
+) {
+  var subject =
+    'Krystal IT Helpdesk - EOD Daily Report Reminder';
+
+  var body =
+    'Dear ' +
+    engineer.name +
+    ',\n\n' +
+
+    'This is an automated reminder to update your ' +
+    'Krystal IT Helpdesk Daily Report before EOD.\n\n' +
+
+    'Date: ' +
+    dateKey +
+    '\n' +
+
+    'Status: ' +
+    reason +
+    '\n\n' +
+
+    'Tally Form:\n' +
+    CFG.TALLY_FORM_URL +
+    '\n\n' +
+
+    'Please make sure all today\'s helpdesk calls are entered ' +
+    'and completed status is updated before EOD.\n\n' +
+
+    'Regards,\n' +
+    CFG.SENDER_NAME;
+
+  var htmlBody =
+    '<div style="font-family:Arial,sans-serif;">' +
+
+    '<h2 style="color:#17365D;">' +
+    'Krystal IT Helpdesk' +
+    '</h2>' +
+
+    '<p>Dear <b>' +
+    engineer.name +
+    '</b>,</p>' +
+
+    '<p>This is an automated reminder to update your ' +
+    'Krystal IT Helpdesk Daily Report before EOD.</p>' +
+
+    '<table border="1" cellpadding="8" ' +
+    'style="border-collapse:collapse;">' +
+
+    '<tr>' +
+    '<td><b>Date</b></td>' +
+    '<td>' +
+    dateKey +
+    '</td>' +
+    '</tr>' +
+
+    '<tr>' +
+    '<td><b>Status</b></td>' +
+    '<td>' +
+    reason +
+    '</td>' +
+    '</tr>' +
+
+    '</table>' +
+
+    '<p>' +
+    '<a href="' +
+    CFG.TALLY_FORM_URL +
+    '" style="background:#17365D;color:white;' +
+    'padding:10px 16px;text-decoration:none;' +
+    'border-radius:4px;">' +
+    'Open Daily Report Form' +
+    '</a>' +
+    '</p>' +
+
+    '<p>Please make sure all today\'s helpdesk calls are ' +
+    'entered and the completion status is updated before EOD.</p>' +
+
+    '<p>Regards,<br>' +
+    CFG.SENDER_NAME +
+    '</p>' +
+
+    '</div>';
+
+  try {
+    MailApp.sendEmail({
+      to: engineer.email,
+      cc: CFG.CC_EMAIL,
+      replyTo: CFG.SENDER_EMAIL,
+      name: CFG.SENDER_NAME,
+      subject: subject,
+      body: body,
+      htmlBody: htmlBody
+    });
+
+    LOG_REMINDER(
+      dateKey,
+      engineer.name,
+      engineer.email,
+      reason,
+      'SENT'
+    );
+
+    Logger.log(
+      'Reminder SENT: ' +
+      engineer.name
+    );
+
+  } catch (err) {
+    LOG_REMINDER(
+      dateKey,
+      engineer.name,
+      engineer.email,
+      reason,
+      'ERROR: ' + err
+    );
+
+    Logger.log(
+      'Reminder ERROR: ' +
+      engineer.name +
+      ' | ' +
+      err
+    );
+  }
+}
+
+
+/***************************************************************
+ * LOG REMINDER
+ ***************************************************************/
+function LOG_REMINDER(
+  dateKey,
+  engineer,
+  email,
+  reason,
+  status
+) {
+  var sh =
+    ENSURE_SHEET(
+      CFG.REMINDER_LOG_SHEET_NAME,
+      [
+        'Timestamp',
+        'Date',
+        'Engineer',
+        'Email',
+        'Status',
+        'Reason'
+      ]
+    );
+
+  sh.appendRow([
+    new Date(),
+    dateKey,
+    engineer,
+    email,
+    status,
+    reason
+  ]);
+
+  sh.getRange(
+    1,
+    1,
+    1,
+    6
+  )
+    .setFontWeight('bold')
+    .setBackground('#17365D')
+    .setFontColor('#FFFFFF');
+}
+
+
+/***************************************************************
+ * TEST REMINDER STATUS
+ ***************************************************************/
+function TEST_REMINDER_STATUS() {
+  var records =
+    GET_RAW_RECORDS();
+
+  var today =
+    Utilities.formatDate(
+      new Date(),
+      CFG.TIMEZONE,
+      'yyyy-MM-dd'
+    );
+
+  Logger.log(
+    '=========================================='
+  );
+
+  Logger.log(
+    'REMINDER STATUS'
+  );
+
+  Logger.log(
+    'Today: ' +
+    today
+  );
+
+  Logger.log(
+    'Reminder time: ' +
+    CFG.REMINDER_HOUR +
+    ':' +
+    CFG.REMINDER_MINUTE
+  );
+
+  Logger.log(
+    'Timezone: ' +
+    CFG.TIMEZONE
+  );
+
+  Logger.log(
+    'Sunday reminders: DISABLED'
+  );
+
+  var i;
+
+  for (
+    i = 0;
+    i < CFG.ENGINEERS.length;
+    i++
+  ) {
+    var count = 0;
+    var pending = 0;
+    var j;
+
+    for (
+      j = 0;
+      j < records.length;
+      j++
+    ) {
+      if (
+        records[j].dateKey ===
+        today &&
+        String(
+          records[j].engineer
+        )
+          .trim()
+          .toLowerCase() ===
+        CFG.ENGINEERS[i].name
+          .trim()
+          .toLowerCase()
+      ) {
+        count++;
+
+        if (
+          records[j].completed !==
+          'Completed'
+        ) {
+          pending++;
+        }
+      }
+    }
+
+    Logger.log(
+      CFG.ENGINEERS[i].name +
+      ' | Today Records=' +
+      count +
+      ' | Pending=' +
+      pending +
+      ' | Email=' +
+      CFG.ENGINEERS[i].email
+    );
+  }
+
+  Logger.log(
+    '=========================================='
+  );
+}
+
+
+/***************************************************************
+ * TEST EMAIL
+ ***************************************************************/
+function TEST_EMAIL() {
+  var email =
+    Session.getEffectiveUser()
+      .getEmail();
+
+  if (!email) {
+    throw new Error(
+      'Unable to determine your Google account email.'
+    );
+  }
+
+  MailApp.sendEmail({
+    to: email,
+    subject:
+      'Krystal IT Helpdesk - Test Email',
+    body:
+      'This is a test email from the Krystal IT Helpdesk Apps Script.\n\n' +
+      'Tally Form: ' +
+      CFG.TALLY_FORM_URL,
+    name:
+      CFG.SENDER_NAME,
+    replyTo:
+      CFG.SENDER_EMAIL
+  });
+
+  Logger.log(
+    'Test email sent to: ' +
+    email
+  );
+}
+
+
+/***************************************************************
+ * VERIFY FULL SYSTEM
+ ***************************************************************/
+function VERIFY_SYSTEM() {
+  var ss =
+    SpreadsheetApp.openById(
+      CFG.SPREADSHEET_ID
+    );
+
+  Logger.log(
+    '=========================================='
+  );
+
+  Logger.log(
+    'KRYSTAL SYSTEM VERIFICATION'
+  );
+
+  Logger.log(
+    '=========================================='
+  );
+
+  /*
+   * TALLY
+   */
+  var tally =
+    ss.getSheetByName(
+      CFG.TALLY_SHEET_NAME
+    );
+
+  var tallyPass = false;
+
+  if (!tally) {
+    Logger.log(
+      'FAIL: Tally sheet not found.'
+    );
+  } else {
+    try {
+      VALIDATE_TALLY_HEADERS();
+      tallyPass = true;
+
+      Logger.log(
+        'PASS: Tally connection is working.'
+      );
+
+      Logger.log(
+        'Tally sheet: ' +
+        CFG.TALLY_SHEET_NAME
+      );
+
+      Logger.log(
+        'Tally records: ' +
+        Math.max(
+          0,
+          tally.getLastRow() - 1
+        )
+      );
+
+      Logger.log(
+        'Tally columns: ' +
+        tally.getLastColumn()
+      );
+
+    } catch (tallyErr) {
+      Logger.log(
+        'FAIL: Tally header validation: ' +
+        tallyErr
+      );
+    }
+  }
+
+
+  /*
+   * RAW DATA
+   */
+  var raw =
+    ss.getSheetByName(
+      CFG.RAW_SHEET_NAME
+    );
+
+  var rawPass = false;
+
+  if (!raw) {
+    Logger.log(
+      'FAIL: Raw_Data missing.'
+    );
+  } else {
+    rawPass = true;
+
+    Logger.log(
+      'PASS: Raw_Data exists.'
+    );
+
+    Logger.log(
+      'Raw_Data rows: ' +
+      Math.max(
+        0,
+        raw.getLastRow() - 1
+      )
+    );
+
+    Logger.log(
+      'Raw_Data columns: ' +
+      raw.getLastColumn()
+    );
+  }
+
+
+  /*
+   * TOTAL TIME
+   */
+  var totalTimePass = true;
+
+  if (
+    raw &&
+    raw.getLastRow() > 1
+  ) {
+    var rawData =
+      raw.getRange(
+        2,
+        1,
+        raw.getLastRow() - 1,
+        CFG.RAW_HEADERS.length
+      ).getValues();
+
+    var valid = 0;
+    var missing = 0;
+    var invalid = 0;
+
+    var i;
+
+    for (
+      i = 0;
+      i < rawData.length;
+      i++
+    ) {
+      var start =
+        rawData[i][11];
+
+      var end =
+        rawData[i][12];
+
+      var total =
+        rawData[i][13];
+
+      if (
+        start === '' ||
+        start === null ||
+        end === '' ||
+        end === null
+      ) {
+        if (
+          total === '' ||
+          total === null
+        ) {
+          missing++;
+        } else {
+          valid++;
+        }
+      } else {
+        var expected =
+          DURATION(
+            start,
+            end
+          );
+
+        var actual =
+          PARSE_DURATION_TEXT(
+            total
+          );
+
+        if (
+          expected !== null &&
+          Math.abs(
+            expected - actual
+          ) <= 1
+        ) {
+          valid++;
+        } else {
+          invalid++;
+        }
+      }
+    }
+
+    Logger.log(
+      'Total Time valid: ' +
+      valid
+    );
+
+    Logger.log(
+      'Total Time missing: ' +
+      missing
+    );
+
+    Logger.log(
+      'Total Time invalid: ' +
+      invalid
+    );
+
+    if (invalid === 0) {
+      Logger.log(
+        'PASS: Total Time calculations verified.'
+      );
+    } else {
+      totalTimePass = false;
+
+      Logger.log(
+        'FAIL: Total Time calculation issue found.'
+      );
+    }
+  }
+
+
+  /*
+   * DASHBOARD
+   */
+  var dashboard =
+    ss.getSheetByName(
+      CFG.DASHBOARD_SHEET_NAME
+    );
+
+  var dashboardPass = false;
+
+  if (
+    dashboard &&
+    dashboard.getLastRow() > 0
+  ) {
+    dashboardPass = true;
+
+    Logger.log(
+      'PASS: Dashboard exists and is populated.'
+    );
+
+    Logger.log(
+      'Dashboard rows: ' +
+      dashboard.getLastRow()
+    );
+
+    Logger.log(
+      'Dashboard columns: ' +
+      dashboard.getLastColumn()
+    );
+
+    Logger.log(
+      'Dashboard charts: ' +
+      dashboard.getCharts().length
+    );
+
+  } else {
+    Logger.log(
+      'FAIL: Dashboard missing.'
+    );
+  }
+
+
+  /*
+   * ENGINEER SHEETS
+   */
+  var totalEngineerRecords = 0;
+  var foundEngineers = 0;
+
+  var i;
+
+  for (
+    i = 0;
+    i < CFG.ENGINEERS.length;
+    i++
+  ) {
+    var engineerSheet =
+      ss.getSheetByName(
+        'Engineer - ' +
+        CFG.ENGINEERS[i].name
+      );
+
+    if (engineerSheet) {
+      var count =
+        Math.max(
+          0,
+          engineerSheet.getLastRow() - 1
+        );
+
+      foundEngineers++;
+
+      totalEngineerRecords +=
+        count;
+
+      Logger.log(
+        'PASS: Engineer - ' +
+        CFG.ENGINEERS[i].name +
+        ' | Records=' +
+        count +
+        ' | Columns=' +
+        engineerSheet.getLastColumn()
+      );
+
+    } else {
+      Logger.log(
+        'FAIL: Engineer sheet missing: ' +
+        CFG.ENGINEERS[i].name
+      );
+    }
+  }
+
+  var engineerPass =
+    foundEngineers ===
+    CFG.ENGINEERS.length;
+
+  Logger.log(
+    'Engineer sheets found: ' +
+    foundEngineers +
+    '/' +
+    CFG.ENGINEERS.length
+  );
+
+  Logger.log(
+    'Total engineer-sheet records: ' +
+    totalEngineerRecords
+  );
+
+
+  /*
+   * REMINDER LOG
+   */
+  var reminderLog =
+    ss.getSheetByName(
+      CFG.REMINDER_LOG_SHEET_NAME
+    );
+
+  var reminderLogPass =
+    !!reminderLog;
+
+  if (reminderLog) {
+    Logger.log(
+      'PASS: Reminder_Log sheet exists.'
+    );
+  } else {
+    Logger.log(
+      'FAIL: Reminder_Log sheet missing.'
+    );
+  }
+
+
+  /*
+   * TRIGGERS
+   */
+  var triggers =
+    ScriptApp.getProjectTriggers();
+
+  var autoSyncFound = false;
+  var reminderFound = false;
+
+  Logger.log(
+    'INSTALLED TRIGGERS'
+  );
+
+  Logger.log(
+    'Total installed triggers: ' +
+    triggers.length
+  );
+
+  for (
+    i = 0;
+    i < triggers.length;
+    i++
+  ) {
+    var handler =
+      triggers[i]
+        .getHandlerFunction();
+
+    var type =
+      triggers[i]
+        .getTriggerSource();
+
+    Logger.log(
+      'Trigger ' +
+      (i + 1) +
+      ': ' +
+      handler +
+      ' | ' +
+      type
+    );
+
+    if (
+      handler === 'AUTO_SYNC'
+    ) {
+      autoSyncFound = true;
+    }
+
+    if (
+      handler === 'SEND_REMINDERS'
+    ) {
+      reminderFound = true;
+    }
+  }
+
+  Logger.log(
+    autoSyncFound
+      ? 'PASS: AUTO_SYNC trigger installed.'
+      : 'FAIL: AUTO_SYNC trigger missing.'
+  );
+
+  Logger.log(
+    reminderFound
+      ? 'PASS: SEND_REMINDERS trigger installed.'
+      : 'FAIL: SEND_REMINDERS trigger missing.'
+  );
+
+
+  /*
+   * EMAIL CONFIG
+   */
+  Logger.log(
+    'ENGINEER EMAIL CONFIG'
+  );
+
+  for (
+    i = 0;
+    i < CFG.ENGINEERS.length;
+    i++
+  ) {
+    Logger.log(
+      CFG.ENGINEERS[i].name +
+      ' -> ' +
+      CFG.ENGINEERS[i].email
+    );
+  }
+
+  Logger.log(
+    'CC -> ' +
+    CFG.CC_EMAIL
+  );
+
+  Logger.log(
+    'Sender name -> ' +
+    CFG.SENDER_NAME
+  );
+
+  Logger.log(
+    'Reply-to -> ' +
+    CFG.SENDER_EMAIL
+  );
+
+
+  /*
+   * FINAL
+   */
+  var chartsPass =
+    dashboard &&
+    dashboard.getCharts().length > 0;
+
+  var triggersPass =
+    autoSyncFound &&
+    reminderFound;
+
+  Logger.log(
+    '=========================================='
+  );
+
+  Logger.log(
+    'FINAL VERIFICATION'
+  );
+
+  Logger.log(
+    'Tally connection: ' +
+    (
+      tallyPass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    'Raw_Data: ' +
+    (
+      rawPass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    'Total Time: ' +
+    (
+      totalTimePass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    'Dashboard: ' +
+    (
+      dashboardPass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    'Engineer sheets: ' +
+    (
+      engineerPass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    'Reminder Log: ' +
+    (
+      reminderLogPass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    'Triggers: ' +
+    (
+      triggersPass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    'Charts: ' +
+    (
+      chartsPass
+        ? 'PASS'
+        : 'FAIL'
+    )
+  );
+
+  Logger.log(
+    '=========================================='
+  );
+
+  return {
+    tally: tallyPass,
+    rawData: rawPass,
+    totalTime: totalTimePass,
+    dashboard: dashboardPass,
+    engineerSheets: engineerPass,
+    reminderLog: reminderLogPass,
+    triggers: triggersPass,
+    charts: chartsPass
+  };
+}
+
+
+/***************************************************************
+ * SETUP SYSTEM
+ *
+ * RUN THIS ONCE AFTER PASTING THE SCRIPT.
+ ***************************************************************/
+function SETUP_SYSTEM() {
+  var ss =
+    SpreadsheetApp.openById(
+      CFG.SPREADSHEET_ID
+    );
+
+  try {
+    ss.setSpreadsheetTimeZone(
+      CFG.TIMEZONE
+    );
+  } catch (e) {
+    Logger.log(
+      'Timezone warning: ' +
+      e
+    );
+  }
+
+  /*
+   * Validate Tally before building system.
+   */
+  VALIDATE_TALLY_HEADERS();
+
+  ENSURE_SHEET(
+    CFG.RAW_SHEET_NAME,
+    CFG.RAW_HEADERS
+  );
+
+  ENSURE_SHEET(
+    CFG.DASHBOARD_SHEET_NAME,
+    []
+  );
+
+  ENSURE_SHEET(
+    CFG.MASTER_SHEET_NAME,
+    [
+      'Engineer Name',
+      'Email',
+      'Active',
+      'SLA Hours'
+    ]
+  );
+
+  ENSURE_SHEET(
+    CFG.LISTS_SHEET_NAME,
+    [
+      'Engineer',
+      'Department',
+      'Location',
+      'Call Category',
+      'Status'
+    ]
+  );
+
+  ENSURE_SHEET(
+    CFG.REMINDER_LOG_SHEET_NAME,
+    [
+      'Timestamp',
+      'Date',
+      'Engineer',
+      'Email',
+      'Status',
+      'Reason'
+    ]
+  );
+
+  ENSURE_SHEET(
+    CFG.SYNC_INDEX_SHEET_NAME,
+    [
+      'Submission ID',
+      'Tally Row'
+    ]
+  );
+
+  /*
+   * Run first full sync.
+   */
+  SYNC_TALLY_NOW();
+
+  /*
+   * Install / repair triggers.
+   */
+  INSTALL_TRIGGERS();
+
+  Logger.log(
+    '=========================================='
+  );
+
+  Logger.log(
+    'SETUP COMPLETE'
+  );
+
+  Logger.log(
+    '=========================================='
+  );
+}

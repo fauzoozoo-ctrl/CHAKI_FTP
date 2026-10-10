@@ -1,0 +1,2203 @@
+/***************************************************************
+ * KRYSTAL GROUP - PROFESSIONAL DASHBOARD
+ * DASHBOARD-ONLY SECTION
+ *
+ * IMPORTANT:
+ * -------------------------------------------------------------
+ * 1. Keep this in the SAME Apps Script project as CFG.
+ * 2. Does NOT modify Tally connection.
+ * 3. Does NOT modify Total Time calculation.
+ * 4. Does NOT modify Engineer Sheets.
+ * 5. Does NOT modify 5 PM reminders.
+ * 6. Preserves existing dashboard filter cells B4:B9.
+ ***************************************************************/
+
+
+/***************************************************************
+ * MAIN DASHBOARD FUNCTION
+ ***************************************************************/
+function UPDATE_DASHBOARD() {
+
+  var ss = SpreadsheetApp.openById(CFG.SPREADSHEET_ID);
+  var dash = ss.getSheetByName("Dashboard");
+  var raw = ss.getSheetByName("Raw_Data");
+
+  if (!dash) {
+    dash = ss.insertSheet("Dashboard");
+  }
+
+  if (!raw) {
+    throw new Error("Raw_Data sheet not found.");
+  }
+
+  var tz = CFG.TIMEZONE || Session.getScriptTimeZone() || "Asia/Kolkata";
+
+  /*
+   * Preserve existing filter values before rebuilding dashboard.
+   * Existing production structure uses B4:B9.
+   */
+  var engineerFilter = dash.getRange("B4").getValue();
+  var fromDateFilter = dash.getRange("B5").getValue();
+  var toDateFilter = dash.getRange("B6").getValue();
+  var deptFilter = dash.getRange("B7").getValue();
+  var locationFilter = dash.getRange("B8").getValue();
+  var categoryFilter = dash.getRange("B9").getValue();
+
+  /*
+   * If dashboard has never been configured, use defaults.
+   */
+  if (engineerFilter === "") {
+    engineerFilter = "All";
+  }
+
+  /*
+   * Clear dashboard area.
+   * This does not touch Raw_Data or any other sheet.
+   */
+  DASH_CLEAR_DASHBOARD(dash);
+
+  /*
+   * Read raw records using existing production function
+   * where possible.
+   */
+  var records = [];
+
+  try {
+    records = GET_RAW_RECORDS();
+  } catch (err) {
+    records = DASH_READ_RAW_DATA(raw);
+  }
+
+  if (!records || !records.length) {
+    DASH_BUILD_HEADER(dash, tz);
+    DASH_BUILD_EMPTY(dash);
+    DASH_SETUP_FILTERS(
+      dash,
+      ss,
+      engineerFilter,
+      fromDateFilter,
+      toDateFilter,
+      deptFilter,
+      locationFilter,
+      categoryFilter
+    );
+
+    dash.getRange("A30")
+      .setValue("No helpdesk records available.")
+      .setFontSize(12);
+
+    Logger.log("Dashboard updated. Filtered records: 0");
+    return;
+  }
+
+  /*
+   * Normalize records into a common dashboard format.
+   */
+  var normalized = DASH_NORMALIZE_RECORDS(records);
+
+  /*
+   * Apply dashboard filters.
+   */
+  var filtered = DASH_FILTER_RECORDS(
+    normalized,
+    engineerFilter,
+    fromDateFilter,
+    toDateFilter,
+    deptFilter,
+    locationFilter,
+    categoryFilter
+  );
+
+  /*
+   * Header
+   */
+  DASH_BUILD_HEADER(dash, tz);
+
+  /*
+   * Filters
+   */
+  DASH_SETUP_FILTERS(
+    dash,
+    ss,
+    engineerFilter,
+    fromDateFilter,
+    toDateFilter,
+    deptFilter,
+    locationFilter,
+    categoryFilter
+  );
+
+  /*
+   * KPI CARDS
+   */
+  DASH_BUILD_KPIS(dash, filtered);
+
+  /*
+   * ENGINEER PERFORMANCE
+   */
+  DASH_BUILD_ENGINEER_TABLE(dash, filtered);
+
+  /*
+   * DAILY TREND
+   */
+  DASH_BUILD_DAILY_TREND(dash, filtered);
+
+  /*
+   * CATEGORY SUMMARY
+   */
+  DASH_BUILD_CATEGORY_TABLE(dash, filtered);
+
+  /*
+   * COMPLETION SUMMARY
+   */
+  DASH_BUILD_COMPLETION_TABLE(dash, filtered);
+
+  /*
+   * FILTERED CALL DETAILS
+   */
+  DASH_BUILD_CALL_DETAILS(dash, filtered);
+
+  /*
+   * Charts
+   */
+  DASH_BUILD_CHARTS(dash);
+
+  /*
+   * Footer
+   */
+  var footerRow = Math.max(32, 31 + filtered.length);
+
+  dash.getRange("A" + footerRow)
+    .setValue("Last Dashboard Refresh");
+
+  dash.getRange("B" + footerRow)
+    .setValue(new Date())
+    .setNumberFormat("dd-mmm-yyyy hh:mm:ss");
+
+  dash.getRange("A" + footerRow)
+    .setFontWeight("bold");
+
+  dash.getRange("A1:L" + footerRow)
+    .setVerticalAlignment("middle");
+
+  /*
+   * Freeze header/filter section.
+   */
+  dash.setFrozenRows(9);
+
+  /*
+   * Column widths.
+   */
+  DASH_SET_COLUMN_WIDTHS(dash);
+
+  /*
+   * Final formatting.
+   */
+  dash.getRange("A1:L" + footerRow)
+    .setWrap(true);
+
+  SpreadsheetApp.flush();
+
+  Logger.log(
+    "Dashboard updated. Filtered records: " + filtered.length
+  );
+}
+
+
+/***************************************************************
+ * CLEAR DASHBOARD
+ ***************************************************************/
+function DASH_CLEAR_DASHBOARD(dash) {
+
+  /*
+   * Remove existing charts.
+   */
+  var charts = dash.getCharts();
+
+  for (var i = 0; i < charts.length; i++) {
+    dash.removeChart(charts[i]);
+  }
+
+  /*
+   * Clear dashboard working area.
+   */
+  var range = dash.getRange("A1:Z2000");
+
+  range.breakApart();
+  range.clearContent();
+  range.clearFormat();
+
+  /*
+   * Clear validations.
+   */
+  range.clearDataValidations();
+
+  /*
+   * Clear notes.
+   */
+  range.clearNote();
+}
+
+
+/***************************************************************
+ * HEADER
+ ***************************************************************/
+function DASH_BUILD_HEADER(dash, tz) {
+
+  dash.getRange("A1:L1")
+    .merge();
+
+  dash.getRange("A1")
+    .setValue("KRYSTAL GROUP - IT HELPDESK DAILY DASHBOARD")
+    .setFontSize(18)
+    .setFontWeight("bold")
+    .setHorizontalAlignment("center")
+    .setVerticalAlignment("middle");
+
+  dash.setRowHeight(1, 38);
+
+  dash.getRange("A2:L2")
+    .merge();
+
+  dash.getRange("A2")
+    .setValue(
+      "Helpdesk performance, workload, completion and working-time overview"
+    )
+    .setHorizontalAlignment("center")
+    .setFontSize(10);
+
+  dash.getRange("A3:L3")
+    .merge();
+
+  dash.getRange("A3")
+    .setValue(
+      "Timezone: " + tz + " | Data Source: Raw_Data"
+    )
+    .setHorizontalAlignment("center")
+    .setFontSize(9);
+}
+
+
+/***************************************************************
+ * FILTER AREA
+ *
+ * PRESERVES PRODUCTION FILTER CELLS:
+ *
+ * B4 = Engineer
+ * B5 = From Date
+ * B6 = To Date
+ * B7 = Department
+ * B8 = Location
+ * B9 = Call Category
+ ***************************************************************/
+function DASH_SETUP_FILTERS(
+  dash,
+  ss,
+  engineerFilter,
+  fromDateFilter,
+  toDateFilter,
+  deptFilter,
+  locationFilter,
+  categoryFilter
+) {
+
+  dash.getRange("A4").setValue("Engineer");
+  dash.getRange("A5").setValue("From Date");
+  dash.getRange("A6").setValue("To Date");
+  dash.getRange("A7").setValue("Department");
+  dash.getRange("A8").setValue("Location");
+  dash.getRange("A9").setValue("Call Category");
+
+  dash.getRange("A4:A9")
+    .setFontWeight("bold");
+
+  dash.getRange("A4:B9")
+    .setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+
+  dash.getRange("B4")
+    .setValue(engineerFilter || "All");
+
+  dash.getRange("B5")
+    .setValue(fromDateFilter || "");
+
+  dash.getRange("B6")
+    .setValue(toDateFilter || "");
+
+  dash.getRange("B7")
+    .setValue(deptFilter || "All");
+
+  dash.getRange("B8")
+    .setValue(locationFilter || "All");
+
+  dash.getRange("B9")
+    .setValue(categoryFilter || "All");
+
+  dash.getRange("B5:B6")
+    .setNumberFormat("dd-mmm-yyyy");
+
+  /*
+   * Build unique values from Raw_Data.
+   */
+  var raw = ss.getSheetByName("Raw_Data");
+
+  if (!raw) {
+    return;
+  }
+
+  var values = raw.getDataRange().getValues();
+
+  if (values.length < 2) {
+    return;
+  }
+
+  var headers = values[0];
+
+  var engineerCol = DASH_HEADER_INDEX(
+    headers,
+    "Engineer Name"
+  );
+
+  var deptCol = DASH_HEADER_INDEX(
+    headers,
+    "Dept."
+  );
+
+  var locationCol = DASH_HEADER_INDEX(
+    headers,
+    "Location"
+  );
+
+  var categoryCol = DASH_HEADER_INDEX(
+    headers,
+    "Call Category"
+  );
+
+  var engineers = [];
+  var departments = [];
+  var locations = [];
+  var categories = [];
+
+  for (var i = 1; i < values.length; i++) {
+
+    if (
+      engineerCol >= 0 &&
+      values[i][engineerCol] !== ""
+    ) {
+      engineers.push(
+        String(values[i][engineerCol]).trim()
+      );
+    }
+
+    if (
+      deptCol >= 0 &&
+      values[i][deptCol] !== ""
+    ) {
+      departments.push(
+        String(values[i][deptCol]).trim()
+      );
+    }
+
+    if (
+      locationCol >= 0 &&
+      values[i][locationCol] !== ""
+    ) {
+      locations.push(
+        String(values[i][locationCol]).trim()
+      );
+    }
+
+    if (
+      categoryCol >= 0 &&
+      values[i][categoryCol] !== ""
+    ) {
+      categories.push(
+        String(values[i][categoryCol]).trim()
+      );
+    }
+  }
+
+  engineers = DASH_UNIQUE_SORT(engineers);
+  departments = DASH_UNIQUE_SORT(departments);
+  locations = DASH_UNIQUE_SORT(locations);
+  categories = DASH_UNIQUE_SORT(categories);
+
+  /*
+   * Engineer
+   */
+  DASH_SET_VALIDATION(
+    dash.getRange("B4"),
+    ["All"].concat(engineers)
+  );
+
+  /*
+   * Department
+   */
+  DASH_SET_VALIDATION(
+    dash.getRange("B7"),
+    ["All"].concat(departments)
+  );
+
+  /*
+   * Location
+   */
+  DASH_SET_VALIDATION(
+    dash.getRange("B8"),
+    ["All"].concat(locations)
+  );
+
+  /*
+   * Call Category
+   */
+  DASH_SET_VALIDATION(
+    dash.getRange("B9"),
+    ["All"].concat(categories)
+  );
+}
+
+
+/***************************************************************
+ * VALIDATION
+ ***************************************************************/
+function DASH_SET_VALIDATION(range, values) {
+
+  var clean = [];
+
+  for (var i = 0; i < values.length; i++) {
+
+    var value = String(values[i]).trim();
+
+    if (
+      value !== "" &&
+      clean.indexOf(value) === -1
+    ) {
+      clean.push(value);
+    }
+  }
+
+  if (!clean.length) {
+    return;
+  }
+
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(clean, true)
+    .setAllowInvalid(true)
+    .build();
+
+  range.setDataValidation(rule);
+}
+
+
+/***************************************************************
+ * KPI CARDS
+ ***************************************************************/
+function DASH_BUILD_KPIS(dash, records) {
+
+  var totalCalls = records.length;
+
+  var completed = 0;
+  var pending = 0;
+  var workingMinutes = 0;
+  var callsWithTime = 0;
+
+  for (var i = 0; i < records.length; i++) {
+
+    if (
+      records[i].completed === "Completed"
+    ) {
+      completed++;
+    } else {
+      pending++;
+    }
+
+    var minutes = DASH_DURATION_MINUTES(
+      records[i].totalTime,
+      records[i].startTime,
+      records[i].endTime
+    );
+
+    if (minutes > 0) {
+      workingMinutes += minutes;
+      callsWithTime++;
+    }
+  }
+
+  var completionPercent = 0;
+
+  if (totalCalls > 0) {
+    completionPercent =
+      completed / totalCalls;
+  }
+
+  var averageMinutes = 0;
+
+  if (callsWithTime > 0) {
+    averageMinutes =
+      workingMinutes / callsWithTime;
+  }
+
+  /*
+   * Six KPI cards.
+   */
+  var cards = [
+    ["Total Calls", totalCalls],
+    ["Completed", completed],
+    ["Pending", pending],
+    ["Completion %", completionPercent],
+    ["Working Time", DASH_FORMAT_MINUTES(workingMinutes)],
+    ["Avg Call Time", DASH_FORMAT_MINUTES(averageMinutes)]
+  ];
+
+  var starts = [
+    "A11",
+    "C11",
+    "E11",
+    "G11",
+    "I11",
+    "K11"
+  ];
+
+  for (var c = 0; c < cards.length; c++) {
+
+    var start = dash.getRange(starts[c]);
+
+    var row = start.getRow();
+    var col = start.getColumn();
+
+    var labelRange = dash.getRange(
+      row,
+      col,
+      1,
+      2
+    );
+
+    var valueRange = dash.getRange(
+      row + 1,
+      col,
+      2,
+      2
+    );
+
+    labelRange.merge();
+    valueRange.merge();
+
+    labelRange
+      .setValue(cards[c][0])
+      .setFontWeight("bold")
+      .setHorizontalAlignment("center")
+      .setVerticalAlignment("middle");
+
+    valueRange
+      .setValue(cards[c][1])
+      .setFontSize(17)
+      .setFontWeight("bold")
+      .setHorizontalAlignment("center")
+      .setVerticalAlignment("middle");
+
+    labelRange.setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+
+    valueRange.setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+
+    if (cards[c][0] === "Completion %") {
+      valueRange.setNumberFormat("0.0%");
+    }
+  }
+
+  dash.setRowHeight(12, 25);
+  dash.setRowHeight(13, 25);
+  dash.setRowHeight(14, 25);
+}
+
+
+/***************************************************************
+ * ENGINEER PERFORMANCE TABLE
+ ***************************************************************/
+function DASH_BUILD_ENGINEER_TABLE(dash, records) {
+
+  var startRow = 17;
+
+  dash.getRange("A16:F16")
+    .merge();
+
+  dash.getRange("A16")
+    .setValue("ENGINEER PERFORMANCE")
+    .setFontWeight("bold")
+    .setFontSize(12);
+
+  var headers = [
+    "Engineer",
+    "Calls",
+    "Completed",
+    "Pending",
+    "Working Time",
+    "Avg Call Time"
+  ];
+
+  dash.getRange(
+    startRow,
+    1,
+    1,
+    headers.length
+  )
+    .setValues([headers])
+    .setFontWeight("bold");
+
+  var map = {};
+
+  for (var i = 0; i < records.length; i++) {
+
+    var engineer =
+      records[i].engineer || "Unassigned";
+
+    if (!map[engineer]) {
+      map[engineer] = {
+        calls: 0,
+        completed: 0,
+        pending: 0,
+        minutes: 0,
+        timedCalls: 0
+      };
+    }
+
+    map[engineer].calls++;
+
+    if (
+      records[i].completed === "Completed"
+    ) {
+      map[engineer].completed++;
+    } else {
+      map[engineer].pending++;
+    }
+
+    var minutes = DASH_DURATION_MINUTES(
+      records[i].totalTime,
+      records[i].startTime,
+      records[i].endTime
+    );
+
+    if (minutes > 0) {
+      map[engineer].minutes += minutes;
+      map[engineer].timedCalls++;
+    }
+  }
+
+  var engineers = Object.keys(map);
+  engineers.sort();
+
+  var output = [];
+
+  for (var e = 0; e < engineers.length; e++) {
+
+    var name = engineers[e];
+    var data = map[name];
+
+    var avg = 0;
+
+    if (data.timedCalls > 0) {
+      avg =
+        data.minutes /
+        data.timedCalls;
+    }
+
+    output.push([
+      name,
+      data.calls,
+      data.completed,
+      data.pending,
+      DASH_FORMAT_MINUTES(data.minutes),
+      DASH_FORMAT_MINUTES(avg)
+    ]);
+  }
+
+  if (output.length) {
+
+    dash.getRange(
+      startRow + 1,
+      1,
+      output.length,
+      headers.length
+    ).setValues(output);
+
+    dash.getRange(
+      startRow,
+      1,
+      output.length + 1,
+      headers.length
+    ).setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+  }
+}
+
+
+/***************************************************************
+ * DAILY TREND TABLE
+ ***************************************************************/
+function DASH_BUILD_DAILY_TREND(dash, records) {
+
+  var startRow = 17;
+  var startCol = 8;
+
+  dash.getRange("H16:L16")
+    .merge();
+
+  dash.getRange("H16")
+    .setValue("DAILY CALL TREND")
+    .setFontWeight("bold")
+    .setFontSize(12);
+
+  var headers = [
+    "Date",
+    "Calls",
+    "Completed",
+    "Pending",
+    "Working Time"
+  ];
+
+  dash.getRange(
+    startRow,
+    startCol,
+    1,
+    headers.length
+  )
+    .setValues([headers])
+    .setFontWeight("bold");
+
+  var map = {};
+
+  for (var i = 0; i < records.length; i++) {
+
+    var key = DASH_DATE_KEY(
+      records[i].date
+    );
+
+    if (!key) {
+      continue;
+    }
+
+    if (!map[key]) {
+      map[key] = {
+        date: records[i].date,
+        calls: 0,
+        completed: 0,
+        pending: 0,
+        minutes: 0
+      };
+    }
+
+    map[key].calls++;
+
+    if (
+      records[i].completed === "Completed"
+    ) {
+      map[key].completed++;
+    } else {
+      map[key].pending++;
+    }
+
+    map[key].minutes +=
+      DASH_DURATION_MINUTES(
+        records[i].totalTime,
+        records[i].startTime,
+        records[i].endTime
+      );
+  }
+
+  var keys = Object.keys(map);
+  keys.sort();
+
+  var output = [];
+
+  for (var d = 0; d < keys.length; d++) {
+
+    var item = map[keys[d]];
+
+    output.push([
+      item.date,
+      item.calls,
+      item.completed,
+      item.pending,
+      DASH_FORMAT_MINUTES(item.minutes)
+    ]);
+  }
+
+  if (output.length) {
+
+    dash.getRange(
+      startRow + 1,
+      startCol,
+      output.length,
+      headers.length
+    ).setValues(output);
+
+    dash.getRange(
+      startRow + 1,
+      startCol,
+      output.length,
+      1
+    ).setNumberFormat("dd-mmm-yyyy");
+
+    dash.getRange(
+      startRow,
+      startCol,
+      output.length + 1,
+      headers.length
+    ).setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+  }
+}
+
+
+/***************************************************************
+ * CATEGORY TABLE
+ ***************************************************************/
+function DASH_BUILD_CATEGORY_TABLE(dash, records) {
+
+  var startRow = 17;
+  var startCol = 14;
+
+  dash.getRange("N16:O16")
+    .merge();
+
+  dash.getRange("N16")
+    .setValue("CALL CATEGORY")
+    .setFontWeight("bold")
+    .setFontSize(12);
+
+  dash.getRange("N17:O17")
+    .setValues([
+      ["Category", "Calls"]
+    ])
+    .setFontWeight("bold");
+
+  var map = {};
+
+  for (var i = 0; i < records.length; i++) {
+
+    var category =
+      records[i].category || "Unclassified";
+
+    if (!map[category]) {
+      map[category] = 0;
+    }
+
+    map[category]++;
+  }
+
+  var keys = Object.keys(map);
+  keys.sort();
+
+  var output = [];
+
+  for (var j = 0; j < keys.length; j++) {
+
+    output.push([
+      keys[j],
+      map[keys[j]]
+    ]);
+  }
+
+  if (output.length) {
+
+    dash.getRange(
+      startRow + 1,
+      startCol,
+      output.length,
+      2
+    ).setValues(output);
+
+    dash.getRange(
+      startRow,
+      startCol,
+      output.length + 1,
+      2
+    ).setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+  }
+}
+
+
+/***************************************************************
+ * COMPLETION TABLE
+ ***************************************************************/
+function DASH_BUILD_COMPLETION_TABLE(dash, records) {
+
+  var startRow = 17;
+  var startCol = 17;
+
+  dash.getRange("Q16:R16")
+    .merge();
+
+  dash.getRange("Q16")
+    .setValue("COMPLETION STATUS")
+    .setFontWeight("bold")
+    .setFontSize(12);
+
+  dash.getRange("Q17:R17")
+    .setValues([
+      ["Status", "Calls"]
+    ])
+    .setFontWeight("bold");
+
+  var completed = 0;
+  var pending = 0;
+
+  for (var i = 0; i < records.length; i++) {
+
+    if (
+      records[i].completed === "Completed"
+    ) {
+      completed++;
+    } else {
+      pending++;
+    }
+  }
+
+  dash.getRange("Q18:R19")
+    .setValues([
+      ["Completed", completed],
+      ["Pending", pending]
+    ]);
+
+  dash.getRange("Q17:R19")
+    .setBorder(
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    );
+}
+
+
+/***************************************************************
+ * CALL DETAILS
+ ***************************************************************/
+function DASH_BUILD_CALL_DETAILS(dash, records) {
+
+  var startRow = 32;
+
+  dash.getRange("A30:L30")
+    .merge();
+
+  dash.getRange("A30")
+    .setValue("FILTERED CALL DETAILS")
+    .setFontWeight("bold")
+    .setFontSize(12);
+
+  var headers = [
+    "Submission ID",
+    "Date",
+    "Engineer",
+    "Department",
+    "Location",
+    "Problem Reported For",
+    "Call Received Time",
+    "Username",
+    "Action Taken",
+    "Start Time",
+    "End Time",
+    "Total Time"
+  ];
+
+  dash.getRange(
+    startRow,
+    1,
+    1,
+    headers.length
+  )
+    .setValues([headers])
+    .setFontWeight("bold");
+
+  var output = [];
+
+  for (var i = 0; i < records.length; i++) {
+
+    output.push([
+      records[i].submissionId,
+      records[i].date,
+      records[i].engineer,
+      records[i].department,
+      records[i].location,
+      records[i].problem,
+      records[i].callReceivedTime,
+      records[i].username,
+      records[i].actionTaken,
+      records[i].startTime,
+      records[i].endTime,
+      records[i].totalTime
+    ]);
+  }
+
+  if (!output.length) {
+
+    dash.getRange(
+      startRow + 1,
+      1
+    )
+      .setValue("No records match the selected filters.");
+
+    return;
+  }
+
+  dash.getRange(
+    startRow + 1,
+    1,
+    output.length,
+    headers.length
+  ).setValues(output);
+
+  dash.getRange(
+    startRow,
+    1,
+    output.length + 1,
+    headers.length
+  ).setBorder(
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  );
+
+  dash.getRange(
+    startRow + 1,
+    2,
+    output.length,
+    1
+  ).setNumberFormat("dd-mmm-yyyy");
+}
+
+
+/***************************************************************
+ * CHARTS
+ ***************************************************************/
+function DASH_BUILD_CHARTS(dash) {
+
+  /*
+   * Engineer workload chart.
+   */
+  var engineerLastRow =
+    DASH_LAST_DATA_ROW(
+      dash,
+      17,
+      1
+    );
+
+  if (engineerLastRow >= 18) {
+
+    var chart1 = dash.newChart()
+      .setChartType(Charts.ChartType.BAR)
+      .addRange(
+        dash.getRange(
+          "A17:B" + engineerLastRow
+        )
+      )
+      .setPosition(34, 1, 0, 0)
+      .setOption(
+        "title",
+        "Engineer Workload"
+      )
+      .setOption(
+        "legend",
+        {
+          position: "none"
+        }
+      )
+      .setOption(
+        "height",
+        300
+      )
+      .setOption(
+        "width",
+        520
+      )
+      .build();
+
+    dash.insertChart(chart1);
+  }
+
+  /*
+   * Daily trend chart.
+   */
+  var dailyLastRow =
+    DASH_LAST_DATA_ROW(
+      dash,
+      17,
+      8
+    );
+
+  if (dailyLastRow >= 18) {
+
+    var chart2 = dash.newChart()
+      .setChartType(
+        Charts.ChartType.COLUMN
+      )
+      .addRange(
+        dash.getRange(
+          "H17:J" + dailyLastRow
+        )
+      )
+      .setPosition(34, 7, 0, 0)
+      .setOption(
+        "title",
+        "Daily Calls vs Completion"
+      )
+      .setOption(
+        "height",
+        300
+      )
+      .setOption(
+        "width",
+        520
+      )
+      .build();
+
+    dash.insertChart(chart2);
+  }
+
+  /*
+   * Category chart.
+   */
+  var categoryLastRow =
+    DASH_LAST_DATA_ROW(
+      dash,
+      17,
+      14
+    );
+
+  if (categoryLastRow >= 18) {
+
+    var chart3 = dash.newChart()
+      .setChartType(
+        Charts.ChartType.BAR
+      )
+      .addRange(
+        dash.getRange(
+          "N17:O" + categoryLastRow
+        )
+      )
+      .setPosition(50, 1, 0, 0)
+      .setOption(
+        "title",
+        "Calls by Category"
+      )
+      .setOption(
+        "legend",
+        {
+          position: "none"
+        }
+      )
+      .setOption(
+        "height",
+        300
+      )
+      .setOption(
+        "width",
+        520
+      )
+      .build();
+
+    dash.insertChart(chart3);
+  }
+
+  /*
+   * Completion pie chart.
+   */
+  var chart4 = dash.newChart()
+    .setChartType(
+      Charts.ChartType.PIE
+    )
+    .addRange(
+      dash.getRange("Q17:R19")
+    )
+    .setPosition(50, 7, 0, 0)
+    .setOption(
+      "title",
+      "Completion Status"
+    )
+    .setOption(
+      "height",
+      300
+    )
+    .setOption(
+      "width",
+      520
+    )
+    .build();
+
+  dash.insertChart(chart4);
+}
+
+
+/***************************************************************
+ * NORMALIZE RAW RECORDS
+ *
+ * This accepts the existing GET_RAW_RECORDS()
+ * output and converts it into a dashboard-safe object.
+ ***************************************************************/
+function DASH_NORMALIZE_RECORDS(records) {
+
+  var output = [];
+
+  for (var i = 0; i < records.length; i++) {
+
+    var r = records[i];
+
+    /*
+     * Supports object-style records from existing
+     * production GET_RAW_RECORDS().
+     */
+    if (
+      r &&
+      typeof r === "object" &&
+      !Array.isArray(r)
+    ) {
+
+      output.push({
+        submissionId:
+          DASH_VALUE(
+            r.submissionId,
+            r["Submission ID"],
+            ""
+          ),
+
+        date:
+          DASH_VALUE(
+            r.date,
+            r["Date"],
+            ""
+          ),
+
+        engineer:
+          DASH_VALUE(
+            r.engineer,
+            r.engineerName,
+            r["Engineer Name"],
+            ""
+          ),
+
+        department:
+          DASH_VALUE(
+            r.department,
+            r.dept,
+            r["Dept."],
+            ""
+          ),
+
+        location:
+          DASH_VALUE(
+            r.location,
+            r["Location"],
+            ""
+          ),
+
+        problem:
+          DASH_VALUE(
+            r.problem,
+            r.problemReportedFor,
+            r["Problem Reported for"],
+            ""
+          ),
+
+        callReceivedTime:
+          DASH_VALUE(
+            r.callReceivedTime,
+            r["Call Received Time"],
+            ""
+          ),
+
+        username:
+          DASH_VALUE(
+            r.username,
+            r["Username"],
+            ""
+          ),
+
+        actionTaken:
+          DASH_VALUE(
+            r.actionTaken,
+            r["Action Taken"],
+            ""
+          ),
+
+        startTime:
+          DASH_VALUE(
+            r.startTime,
+            r["Start Time"],
+            ""
+          ),
+
+        endTime:
+          DASH_VALUE(
+            r.endTime,
+            r["End Time"],
+            ""
+          ),
+
+        totalTime:
+          DASH_VALUE(
+            r.totalTime,
+            r["Total Time"],
+            ""
+          ),
+
+        category:
+          DASH_VALUE(
+            r.category,
+            r.callCategory,
+            r["Call Category"],
+            ""
+          ),
+
+        completed:
+          DASH_NORMALIZE_COMPLETED(
+            DASH_VALUE(
+              r.completed,
+              r["Completed"],
+              ""
+            )
+          )
+      });
+
+      continue;
+    }
+
+    /*
+     * Supports array-style records as a fallback.
+     */
+    if (Array.isArray(r)) {
+
+      output.push({
+        submissionId: r[0],
+        date: r[3],
+        engineer: r[4],
+        department: r[5],
+        location: r[6],
+        problem: r[7],
+        callReceivedTime: r[8],
+        username: r[9],
+        actionTaken: r[10],
+        startTime: r[11],
+        endTime: r[12],
+        totalTime: r[13],
+        category: r[14],
+        completed:
+          DASH_NORMALIZE_COMPLETED(r[15])
+      });
+    }
+  }
+
+  return output;
+}
+
+
+/***************************************************************
+ * DASHBOARD FILTERING
+ ***************************************************************/
+function DASH_FILTER_RECORDS(
+  records,
+  engineer,
+  fromDate,
+  toDate,
+  department,
+  location,
+  category
+) {
+
+  var output = [];
+
+  var engineerFilter =
+    DASH_FILTER_VALUE(engineer);
+
+  var departmentFilter =
+    DASH_FILTER_VALUE(department);
+
+  var locationFilter =
+    DASH_FILTER_VALUE(location);
+
+  var categoryFilter =
+    DASH_FILTER_VALUE(category);
+
+  var from =
+    DASH_DATE_ONLY(fromDate);
+
+  var to =
+    DASH_DATE_ONLY(toDate);
+
+  for (var i = 0; i < records.length; i++) {
+
+    var r = records[i];
+
+    /*
+     * Engineer
+     */
+    if (
+      engineerFilter !== "all" &&
+      DASH_FILTER_VALUE(r.engineer) !== engineerFilter
+    ) {
+      continue;
+    }
+
+    /*
+     * Department
+     */
+    if (
+      departmentFilter !== "all" &&
+      DASH_FILTER_VALUE(r.department) !== departmentFilter
+    ) {
+      continue;
+    }
+
+    /*
+     * Location
+     */
+    if (
+      locationFilter !== "all" &&
+      DASH_FILTER_VALUE(r.location) !== locationFilter
+    ) {
+      continue;
+    }
+
+    /*
+     * Category
+     */
+    if (
+      categoryFilter !== "all" &&
+      DASH_FILTER_VALUE(r.category) !== categoryFilter
+    ) {
+      continue;
+    }
+
+    /*
+     * Date
+     */
+    var recordDate =
+      DASH_DATE_ONLY(r.date);
+
+    if (
+      from &&
+      recordDate &&
+      recordDate < from
+    ) {
+      continue;
+    }
+
+    if (
+      to &&
+      recordDate &&
+      recordDate > to
+    ) {
+      continue;
+    }
+
+    output.push(r);
+  }
+
+  return output;
+}
+
+
+/***************************************************************
+ * RAW DATA FALLBACK READER
+ ***************************************************************/
+function DASH_READ_RAW_DATA(raw) {
+
+  var values =
+    raw.getDataRange().getValues();
+
+  if (values.length < 2) {
+    return [];
+  }
+
+  var headers = values[0];
+
+  var idx = {};
+
+  for (var i = 0; i < headers.length; i++) {
+    idx[String(headers[i]).trim()] = i;
+  }
+
+  var output = [];
+
+  for (var r = 1; r < values.length; r++) {
+
+    var row = values[r];
+
+    output.push({
+      "Submission ID":
+        row[idx["Submission ID"]],
+
+      "Date":
+        row[idx["Date"]],
+
+      "Engineer Name":
+        row[idx["Engineer Name"]],
+
+      "Dept.":
+        row[idx["Dept."]],
+
+      "Location":
+        row[idx["Location"]],
+
+      "Problem Reported for":
+        row[idx["Problem Reported for"]],
+
+      "Call Received Time":
+        row[idx["Call Received Time"]],
+
+      "Username":
+        row[idx["Username"]],
+
+      "Action Taken":
+        row[idx["Action Taken"]],
+
+      "Start Time":
+        row[idx["Start Time"]],
+
+      "End Time":
+        row[idx["End Time"]],
+
+      "Total Time":
+        row[idx["Total Time"]],
+
+      "Call Category":
+        row[idx["Call Category"]],
+
+      "Completed":
+        row[idx["Completed"]]
+    });
+  }
+
+  return output;
+}
+
+
+/***************************************************************
+ * HEADER INDEX
+ ***************************************************************/
+function DASH_HEADER_INDEX(headers, name) {
+
+  for (var i = 0; i < headers.length; i++) {
+
+    if (
+      String(headers[i]).trim().toLowerCase() ===
+      String(name).trim().toLowerCase()
+    ) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+
+/***************************************************************
+ * VALUE HELPER
+ ***************************************************************/
+function DASH_VALUE() {
+
+  for (var i = 0; i < arguments.length; i++) {
+
+    var value = arguments[i];
+
+    if (
+      value !== undefined &&
+      value !== null &&
+      value !== ""
+    ) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+
+/***************************************************************
+ * COMPLETION NORMALIZATION
+ ***************************************************************/
+function DASH_NORMALIZE_COMPLETED(value) {
+
+  var text =
+    String(value || "")
+      .trim()
+      .toLowerCase();
+
+  if (
+    text === "completed" ||
+    text === "complete" ||
+    text === "yes" ||
+    text === "done" ||
+    text === "closed" ||
+    text === "true" ||
+    text === "1"
+  ) {
+    return "Completed";
+  }
+
+  return "Pending";
+}
+
+
+/***************************************************************
+ * FILTER VALUE
+ ***************************************************************/
+function DASH_FILTER_VALUE(value) {
+
+  var text =
+    String(value || "")
+      .trim()
+      .toLowerCase();
+
+  if (
+    text === "" ||
+    text === "all" ||
+    text === "all engineers" ||
+    text === "all departments" ||
+    text === "all locations" ||
+    text === "all categories"
+  ) {
+    return "all";
+  }
+
+  return text;
+}
+
+
+/***************************************************************
+ * DATE ONLY
+ ***************************************************************/
+function DASH_DATE_ONLY(value) {
+
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return null;
+  }
+
+  var date = null;
+
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+
+    if (!isNaN(value.getTime())) {
+      date = new Date(value.getTime());
+    }
+
+  } else if (
+    typeof value === "number"
+  ) {
+
+    date = new Date(value);
+
+  } else {
+
+    date = new Date(String(value));
+
+    if (isNaN(date.getTime())) {
+
+      var text =
+        String(value).trim();
+
+      var parts =
+        text.split(/[\/\-.]/);
+
+      if (parts.length === 3) {
+
+        var a =
+          parseInt(parts[0], 10);
+
+        var b =
+          parseInt(parts[1], 10);
+
+        var c =
+          parseInt(parts[2], 10);
+
+        if (
+          a > 31 &&
+          b >= 1 &&
+          b <= 12 &&
+          c >= 1 &&
+          c <= 31
+        ) {
+          date =
+            new Date(a, b - 1, c);
+        } else if (
+          c > 31 &&
+          a >= 1 &&
+          a <= 31 &&
+          b >= 1 &&
+          b <= 12
+        ) {
+          date =
+            new Date(c, b - 1, a);
+        }
+      }
+    }
+  }
+
+  if (
+    !date ||
+    isNaN(date.getTime())
+  ) {
+    return null;
+  }
+
+  return new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate()
+  );
+}
+
+
+/***************************************************************
+ * DATE KEY
+ ***************************************************************/
+function DASH_DATE_KEY(value) {
+
+  var date =
+    DASH_DATE_ONLY(value);
+
+  if (!date) {
+    return "";
+  }
+
+  var year =
+    date.getFullYear();
+
+  var month =
+    date.getMonth() + 1;
+
+  var day =
+    date.getDate();
+
+  return (
+    String(year) +
+    "-" +
+    (month < 10 ? "0" : "") +
+    String(month) +
+    "-" +
+    (day < 10 ? "0" : "") +
+    String(day)
+  );
+}
+
+
+/***************************************************************
+ * DURATION
+ ***************************************************************/
+function DASH_DURATION_MINUTES(
+  totalTime,
+  startTime,
+  endTime
+) {
+
+  /*
+   * First use Total Time.
+   */
+  if (
+    totalTime !== undefined &&
+    totalTime !== null &&
+    totalTime !== ""
+  ) {
+
+    if (
+      typeof totalTime === "number"
+    ) {
+
+      /*
+       * Google Sheets duration values
+       * are fractions of a day.
+       */
+      if (
+        totalTime > 0 &&
+        totalTime < 1
+      ) {
+        return totalTime * 24 * 60;
+      }
+
+      /*
+       * Numeric values greater than 1
+       * are treated as minutes.
+       */
+      if (totalTime > 0) {
+        return totalTime;
+      }
+    }
+
+    var text =
+      String(totalTime)
+        .trim()
+        .toLowerCase();
+
+    var hoursMatch =
+      text.match(/(\d+(?:\.\d+)?)\s*(?:hr|hrs|hour|hours|h)/);
+
+    var minutesMatch =
+      text.match(/(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes|m)/);
+
+    if (
+      hoursMatch ||
+      minutesMatch
+    ) {
+
+      var hours =
+        hoursMatch
+          ? parseFloat(hoursMatch[1])
+          : 0;
+
+      var minutes =
+        minutesMatch
+          ? parseFloat(minutesMatch[1])
+          : 0;
+
+      return (
+        hours * 60 +
+        minutes
+      );
+    }
+
+    /*
+     * Try HH:MM
+     */
+    var hm =
+      text.match(/^(\d+):(\d{1,2})$/);
+
+    if (hm) {
+
+      return (
+        parseInt(hm[1], 10) * 60 +
+        parseInt(hm[2], 10)
+      );
+    }
+
+    /*
+     * Try decimal numeric text.
+     */
+    var numeric =
+      parseFloat(text);
+
+    if (!isNaN(numeric)) {
+
+      if (
+        numeric > 0 &&
+        numeric < 1
+      ) {
+        return numeric * 24 * 60;
+      }
+
+      return numeric;
+    }
+  }
+
+  /*
+   * Fallback to Start / End Time.
+   */
+  var start =
+    DASH_TIME_MINUTES(startTime);
+
+  var end =
+    DASH_TIME_MINUTES(endTime);
+
+  if (
+    start === null ||
+    end === null
+  ) {
+    return 0;
+  }
+
+  var duration =
+    end - start;
+
+  /*
+   * Overnight support.
+   */
+  if (duration < 0) {
+    duration += 24 * 60;
+  }
+
+  return duration;
+}
+
+
+/***************************************************************
+ * TIME PARSER
+ ***************************************************************/
+function DASH_TIME_MINUTES(value) {
+
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return null;
+  }
+
+  if (
+    Object.prototype.toString.call(value) === "[object Date]"
+  ) {
+
+    return (
+      value.getHours() * 60 +
+      value.getMinutes()
+    );
+  }
+
+  if (
+    typeof value === "number"
+  ) {
+
+    if (
+      value >= 0 &&
+      value < 1
+    ) {
+      return value * 24 * 60;
+    }
+
+    return value;
+  }
+
+  var text =
+    String(value)
+      .trim()
+      .toLowerCase();
+
+  /*
+   * 09:30
+   */
+  var match =
+    text.match(/^(\d{1,2}):(\d{1,2})$/);
+
+  if (match) {
+
+    return (
+      parseInt(match[1], 10) * 60 +
+      parseInt(match[2], 10)
+    );
+  }
+
+  /*
+   * 09.30
+   */
+  match =
+    text.match(/^(\d{1,2})\.(\d{1,2})$/);
+
+  if (match) {
+
+    return (
+      parseInt(match[1], 10) * 60 +
+      parseInt(match[2], 10)
+    );
+  }
+
+  /*
+   * 9:30 AM
+   */
+  match =
+    text.match(
+      /^(\d{1,2}):(\d{1,2})\s*(am|pm)$/
+    );
+
+  if (match) {
+
+    var hour =
+      parseInt(match[1], 10);
+
+    var minute =
+      parseInt(match[2], 10);
+
+    var ampm =
+      match[3];
+
+    if (
+      ampm === "pm" &&
+      hour < 12
+    ) {
+      hour += 12;
+    }
+
+    if (
+      ampm === "am" &&
+      hour === 12
+    ) {
+      hour = 0;
+    }
+
+    return (
+      hour * 60 +
+      minute
+    );
+  }
+
+  return null;
+}
+
+
+/***************************************************************
+ * FORMAT MINUTES
+ ***************************************************************/
+function DASH_FORMAT_MINUTES(minutes) {
+
+  var value =
+    Number(minutes || 0);
+
+  if (isNaN(value)) {
+    return "0 min";
+  }
+
+  value =
+    Math.round(value);
+
+  var hours =
+    Math.floor(value / 60);
+
+  var mins =
+    value % 60;
+
+  if (
+    hours > 0 &&
+    mins > 0
+  ) {
+    return (
+      hours +
+      " hr " +
+      mins +
+      " min"
+    );
+  }
+
+  if (hours > 0) {
+    return hours + " hr";
+  }
+
+  return mins + " min";
+}
+
+
+/***************************************************************
+ * UNIQUE + SORT
+ ***************************************************************/
+function DASH_UNIQUE_SORT(values) {
+
+  var map = {};
+
+  for (var i = 0; i < values.length; i++) {
+
+    var value =
+      String(values[i] || "").trim();
+
+    if (value !== "") {
+      map[value] = true;
+    }
+  }
+
+  var output =
+    Object.keys(map);
+
+  output.sort();
+
+  return output;
+}
+
+
+/***************************************************************
+ * LAST DATA ROW
+ ***************************************************************/
+function DASH_LAST_DATA_ROW(
+  sheet,
+  startRow,
+  column
+) {
+
+  var last =
+    sheet.getLastRow();
+
+  if (last < startRow) {
+    return startRow;
+  }
+
+  return last;
+}
+
+
+/***************************************************************
+ * EMPTY DASHBOARD
+ ***************************************************************/
+function DASH_BUILD_EMPTY(dash) {
+
+  dash.getRange("A11:L11")
+    .merge();
+
+  dash.getRange("A11")
+    .setValue("No records available")
+    .setFontWeight("bold")
+    .setFontSize(14)
+    .setHorizontalAlignment("center");
+}
+
+
+/***************************************************************
+ * COLUMN WIDTHS
+ ***************************************************************/
+function DASH_SET_COLUMN_WIDTHS(dash) {
+
+  dash.setColumnWidth(1, 150);
+  dash.setColumnWidth(2, 110);
+  dash.setColumnWidth(3, 140);
+  dash.setColumnWidth(4, 110);
+  dash.setColumnWidth(5, 120);
+  dash.setColumnWidth(6, 150);
+  dash.setColumnWidth(7, 125);
+  dash.setColumnWidth(8, 130);
+  dash.setColumnWidth(9, 180);
+  dash.setColumnWidth(10, 100);
+  dash.setColumnWidth(11, 100);
+  dash.setColumnWidth(12, 110);
+
+  dash.setColumnWidth(14, 160);
+  dash.setColumnWidth(15, 90);
+  dash.setColumnWidth(17, 140);
+  dash.setColumnWidth(18, 90);
+}
